@@ -132,7 +132,7 @@ def fetch_unread_emails(service, log) -> list:
     log(f"📨 Found {len(messages)} unread email(s). Scanning...\n\n")
     emails = []
     for msg in messages:
-        full    = service.users().messages().get(userId="me", messageId=msg["id"], format="full").execute()
+        full    = service.users().messages().get(userId="me", id=msg["id"]).execute()
         headers = {h["name"]: h["value"] for h in full["payload"]["headers"]}
         emails.append({
             "id":      msg["id"],
