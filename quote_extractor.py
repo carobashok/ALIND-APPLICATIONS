@@ -7,29 +7,35 @@ using Claude AI, and stores them in Supabase.
 Install dependencies:
     pip install streamlit google-auth google-auth-oauthlib
                 google-auth-httplib2 google-api-python-client
-                anthropic supabase python-dotenv
+                anthropic supabase
 
 Run:
     streamlit run quote_extractor.py
+
+Secrets — create .streamlit/secrets.toml in the same folder:
+    ANTHROPIC_API_KEY = "sk-ant-..."
+    SUPABASE_URL      = "https://your-project.supabase.co"
+    SUPABASE_SERVICE_KEY = "eyJ..."
+
+    [gmail]
+    type                    = "authorized_user"
+    client_id               = "....apps.googleusercontent.com"
+    client_secret           = "GOCSPX-..."
+    refresh_token           = "1//..."
 """
 
-import os
 import json
 import base64
 import re
 
 import streamlit as st
-from dotenv import load_dotenv
 
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 import anthropic
 from supabase import create_client, Client
-
-load_dotenv()
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -72,34 +78,26 @@ URGENCY_ICONS  = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
 @st.cache_resource
 def get_supabase() -> Client:
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
-    if not url or not key:
-        st.error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in .env")
-        st.stop()
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
     return create_client(url, key)
 
 
 # ── Gmail Auth ─────────────────────────────────────────────────────────────────
 
 def get_gmail_service():
-    creds = None
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists("credentials.json"):
-                st.error(
-                    "credentials.json not found. "
-                    "Download it from Google Cloud Console → APIs & Services → Credentials → OAuth 2.0."
-                )
-                st.stop()
-            flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open("token.json", "w") as f:
-            f.write(creds.to_json())
+    """Build Gmail service from OAuth token stored in Streamlit secrets."""
+    gmail_secret = dict(st.secrets["gmail"])
+    creds = Credentials(
+        token=None,
+        refresh_token=gmail_secret["refresh_token"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=gmail_secret["client_id"],
+        client_secret=gmail_secret["client_secret"],
+        scopes=SCOPES,
+    )
+    if not creds.valid:
+        creds.refresh(Request())
     return build("gmail", "v1", credentials=creds)
 
 
@@ -154,11 +152,7 @@ def mark_as_read(service, message_id: str):
 # ── Claude Extraction ──────────────────────────────────────────────────────────
 
 def extract_quote_fields(email: dict, log) -> dict | None:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        st.error("Missing ANTHROPIC_API_KEY in .env")
-        st.stop()
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
     prompt = EXTRACTION_PROMPT.format(
         subject=email["subject"],
         sender=email["sender"],
