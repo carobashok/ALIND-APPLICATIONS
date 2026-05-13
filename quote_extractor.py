@@ -202,11 +202,12 @@ def save_attachments(service, email: dict, customer_name: str) -> tuple[str, int
                 data = download_attachment(service, email["id"], att["attachment_id"])
                 upload_to_drive(drive_service, folder_id, att["filename"], data, att["mime_type"])
                 saved += 1
-            except Exception:
-                pass
+            except Exception as att_err:
+                st.warning(f"Could not upload {att['filename']}: {att_err}")
 
         return folder_url, saved
-    except Exception:
+    except Exception as drive_err:
+        st.error(f"Google Drive error: {drive_err}")
         return "", 0
 
 
