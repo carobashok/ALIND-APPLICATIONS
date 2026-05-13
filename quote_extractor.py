@@ -33,10 +33,6 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import anthropic
 from supabase import create_client, Client
-from google.oauth2 import service_account
-from googleapiclient.discovery import build as gdrive_build
-from googleapiclient.http import MediaIoBaseUpload
-import io
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -45,8 +41,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
 ]
 
-GDRIVE_PARENT_FOLDER_ID = "1-_h8dWRpGQPMpRUxqUxRn3xmrYCG6pur"
-GDRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 EXTRACTION_PROMPT = """You are a quote request extractor for Carob Technologies, an AI and analytics company based in Chennai, India.
 
@@ -103,36 +97,6 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
-# ── Google Drive ──────────────────────────────────────────────────────────────
-
-@st.cache_resource
-def get_drive_service():
-    """Build Google Drive service from GCP service account in secrets."""
-    sa_info = dict(st.secrets["gcp_service_account"])
-    creds   = service_account.Credentials.from_service_account_info(
-        sa_info, scopes=GDRIVE_SCOPES
-    )
-    return gdrive_build("drive", "v3", credentials=creds)
-
-
-def create_drive_folder(drive_service, folder_name: str) -> str:
-    """Create a subfolder inside ALIND QUOTES and return its ID."""
-    meta = {
-        "name":     folder_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents":  [GDRIVE_PARENT_FOLDER_ID],
-    }
-    folder = drive_service.files().create(body=meta, fields="id").execute()
-    return folder.get("id")
-
-
-def upload_to_drive(drive_service, folder_id: str, filename: str, data: bytes, mime_type: str):
-    """Upload a file to a specific Drive folder."""
-    meta   = {"name": filename, "parents": [folder_id]}
-    media  = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime_type or "application/octet-stream")
-    drive_service.files().create(body=meta, media_body=media, fields="id").execute()
-
-
 # ── Gmail Helpers ──────────────────────────────────────────────────────────────
 
 def decode_body(payload: dict) -> str:
@@ -180,35 +144,9 @@ def download_attachment(service, message_id: str, attachment_id: str) -> bytes:
 
 
 def save_attachments(service, email: dict, customer_name: str) -> tuple[str, int]:
-    """Upload attachments to Google Drive under ALIND QUOTES. Returns (folder_url, count)."""
+    """Attachment saving — Google Drive integration coming soon."""
     attachments = email.get("attachments", [])
-    if not attachments:
-        return "", 0
-
-    date_str    = datetime.now().strftime("%Y-%m-%d")
-    safe_name   = re.sub(r"[^\w\s-]", "", customer_name or "Unknown").strip().replace(" ", "_")
-    folder_name = f"{date_str}_{safe_name}"
-
-    try:
-        drive_service = get_drive_service()
-        folder_id     = create_drive_folder(drive_service, folder_name)
-        folder_url    = f"https://drive.google.com/drive/folders/{folder_id}"
-
-        saved = 0
-        for att in attachments:
-            if not att["attachment_id"]:
-                continue
-            try:
-                data = download_attachment(service, email["id"], att["attachment_id"])
-                upload_to_drive(drive_service, folder_id, att["filename"], data, att["mime_type"])
-                saved += 1
-            except Exception as att_err:
-                st.warning(f"Could not upload {att['filename']}: {att_err}")
-
-        return folder_url, saved
-    except Exception as drive_err:
-        st.error(f"Google Drive error: {drive_err}")
-        return "", 0
+    return "", len(attachments)
 
 
 def fetch_unread_emails(service) -> list:
@@ -581,8 +519,7 @@ with tab_quotes:
 
                     if row.get("attachment_folder"):
                         st.markdown("**Attachments**")
-                        st.markdown(f"[📁 Open in Google Drive]({row['attachment_folder']})")
-                        st.write(f"📎 {row.get('attachment_count', 0)} file(s)")
+                        st.write(f"📎 {row.get('attachment_count', 0)} attachment(s) — Drive integration coming soon")
 
                 with right:
                     st.markdown("**AI Assessment**")
