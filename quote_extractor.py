@@ -79,6 +79,29 @@ def get_supabase() -> Client:
     return create_client(url, key)
 
 
+# ── Ignored Emails ────────────────────────────────────────────────────────────
+
+def fetch_ignored_ids(supabase: Client) -> set:
+    """Return set of message IDs that should be filtered out."""
+    try:
+        res = supabase.table("ignored_emails").select("message_id").execute()
+        return {row["message_id"] for row in res.data}
+    except Exception:
+        return set()
+
+
+def ignore_email(supabase: Client, email: dict):
+    """Save a message ID to the ignored_emails table."""
+    try:
+        supabase.table("ignored_emails").insert({
+            "message_id": email["id"],
+            "sender":     email["sender"],
+            "subject":    email["subject"],
+        }).execute()
+    except Exception:
+        pass
+
+
 # ── Gmail Auth ─────────────────────────────────────────────────────────────────
 
 @st.cache_resource
@@ -323,10 +346,15 @@ with tab_inbox:
         if st.button("📬 Fetch unread emails", type="primary", use_container_width=True):
             with st.spinner("Connecting to Gmail..."):
                 try:
-                    service = get_gmail_service()
-                    st.session_state.emails   = fetch_unread_emails(service)
+                    service     = get_gmail_service()
+                    all_emails  = fetch_unread_emails(service)
+                    ignored_ids = fetch_ignored_ids(get_supabase())
+                    st.session_state.emails   = [e for e in all_emails if e["id"] not in ignored_ids]
                     st.session_state.selected = set()
                     st.session_state.log      = ""
+                    ignored_count = len(all_emails) - len(st.session_state.emails)
+                    if ignored_count:
+                        st.caption(f"ℹ️ {ignored_count} ignored email(s) filtered out.")
                 except Exception as e:
                     st.error(f"Gmail error: {e}")
 
@@ -383,6 +411,11 @@ with tab_inbox:
                     st.write(email["body"] or "(no body)")
                     if has_att:
                         st.caption(f"📎 Attachments: {', '.join(a['filename'] for a in email['attachments'])}")
+                    if st.button("🚫 Ignore this email", key=f"ign_{email['id']}", help="Hide this email permanently — it will never appear in this app again"):
+                        ignore_email(get_supabase(), email)
+                        st.session_state.emails   = [e for e in st.session_state.emails if e["id"] != email["id"]]
+                        st.session_state.selected.discard(email["id"])
+                        st.rerun()
 
         st.divider()
 
