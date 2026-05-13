@@ -548,6 +548,12 @@ with tab_quotes:
                         except Exception as e:
                             st.error(f"Update failed: {e}")
 
+                # Original email
+                with st.expander("📧 Original email"):
+                    st.write(f"**Subject:** {row.get('raw_email_subject') or '—'}")
+                    st.write(f"**From:** {row.get('sender_email') or '—'}")
+                    st.text(row.get("raw_email_body") or "—")
+
                 # Conversation thread
                 conv_log = row.get("conversation_log") or []
                 if conv_log:
