@@ -118,8 +118,12 @@ def create_drive_folder(drive_service, folder_name: str) -> tuple[str, str]:
     return folder_id, folder_url
 
 
-def upload_bytes_to_drive(drive_service, folder_id: str, filename: str, data: bytes, mime_type: str):
-    """Upload raw bytes to a Drive folder."""
+def upload_bytes_to_drive(drive_service, folder_id: str, filename: str, data: bytes, mime_type: str, timestamp: bool = False):
+    """Upload raw bytes to a Drive folder. Adds timestamp to filename if timestamp=True."""
+    if timestamp:
+        name, ext = filename.rsplit(".", 1) if "." in filename else (filename, "")
+        ts       = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        filename = f"{name}_{ts}.{ext}" if ext else f"{name}_{ts}"
     meta  = {"name": filename, "parents": [folder_id]}
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime_type or "application/octet-stream")
     drive_service.files().create(body=meta, media_body=media, fields="id").execute()
@@ -240,7 +244,7 @@ def save_to_drive(service, email: dict, fields: dict) -> tuple[str, int]:
                 continue
             try:
                 data = download_attachment(service, email["id"], att["attachment_id"])
-                upload_bytes_to_drive(drive_service, folder_id, att["filename"], data, att.get("mime_type", ""))
+                upload_bytes_to_drive(drive_service, folder_id, att["filename"], data, att.get("mime_type", ""), timestamp=True)
                 att_count += 1
             except Exception as e:
                 st.warning(f"Could not upload {att['filename']}: {e}")
@@ -342,18 +346,167 @@ def download_attachment(service, message_id: str, attachment_id: str) -> bytes:
 
 
 
-def fetch_unread_emails(service) -> list:
-    """Fetch all unread emails from inbox with full details."""
-    result = service.users().messages().list(
-        userId="me", labelIds=["INBOX", "UNREAD"], maxResults=30
-    ).execute()
+def fetch_sent_emails(service) -> list:
+    """Fetch sent emails from Gmail Sent folder."""
+    import time
+
+    def execute_with_retry(request, retries=3, delay=2):
+        for attempt in range(retries):
+            try:
+                return request.execute()
+            except Exception as e:
+                if attempt < retries - 1 and ("Broken pipe" in str(e) or "Connection" in str(e) or "reset" in str(e).lower()):
+                    time.sleep(delay)
+                    continue
+                raise
+
+    result = execute_with_retry(
+        service.users().messages().list(userId="me", labelIds=["SENT"], maxResults=50)
+    )
     messages = result.get("messages", [])
     if not messages:
         return []
 
     emails = []
     for msg in messages:
-        full    = service.users().messages().get(userId="me", id=msg["id"]).execute()
+        try:
+            full    = execute_with_retry(service.users().messages().get(userId="me", id=msg["id"]))
+            headers = {h["name"]: h["value"] for h in full["payload"]["headers"]}
+            body    = decode_body(full["payload"])
+            atts    = get_attachments(full["payload"])
+            date_raw = headers.get("Date", "")
+            try:
+                from email.utils import parsedate_to_datetime
+                dt = parsedate_to_datetime(date_raw)
+                date_fmt = dt.strftime("%d %b, %I:%M %p")
+            except Exception:
+                date_fmt = date_raw[:16]
+            emails.append({
+                "id":          msg["id"],
+                "thread_id":   full.get("threadId", ""),
+                "subject":     headers.get("Subject", "(no subject)"),
+                "sender":      headers.get("From", ""),
+                "date":        date_fmt,
+                "body":        body,
+                "attachments": atts,
+            })
+        except Exception:
+            continue
+    return emails
+
+
+def sync_sent_replies(service, supabase: Client) -> int:
+    """
+    Fetch sent emails, match to existing quote threads,
+    append to conversation_log, upload any revised attachments.
+    Returns count of threads updated.
+    """
+    # Get all known thread_ids from Supabase
+    try:
+        res = supabase.table("quote_requests").select(
+            "id, thread_id, conversation_log, reply_count, attachment_folder"
+        ).not_.is_("thread_id", "null").execute()
+        known_threads = {row["thread_id"]: row for row in res.data}
+    except Exception:
+        return 0
+
+    if not known_threads:
+        return 0
+
+    sent_emails = fetch_sent_emails(service)
+    updated     = 0
+    now         = datetime.now(timezone.utc).isoformat()
+
+    for email in sent_emails:
+        thread_id = email.get("thread_id", "")
+        if thread_id not in known_threads:
+            continue
+
+        row = known_threads[thread_id]
+
+        # Check if this message is already in conversation_log
+        conv_log = row.get("conversation_log") or []
+        existing_ids = {e.get("message_id") for e in conv_log}
+        if email["id"] in existing_ids:
+            continue  # already synced
+
+        # Append sent message to conversation log
+        conv_entry = {
+            "message_id": email["id"],
+            "sender":     email["sender"],
+            "timestamp":  now,
+            "subject":    email["subject"],
+            "body":       email["body"][:2000],
+            "type":       "sent",
+        }
+        conv_log.append(conv_entry)
+
+        # Upload revised attachments to same Drive folder with timestamp
+        att_uploaded = 0
+        folder_url   = row.get("attachment_folder", "")
+        if email.get("attachments") and folder_url:
+            try:
+                drive_service = get_drive_service()
+                # Extract folder_id from URL
+                folder_id = folder_url.split("/")[-1]
+                for att in email["attachments"]:
+                    if not att.get("attachment_id"):
+                        continue
+                    try:
+                        data = download_attachment(service, email["id"], att["attachment_id"])
+                        upload_bytes_to_drive(
+                            drive_service, folder_id,
+                            att["filename"], data,
+                            att.get("mime_type", ""),
+                            timestamp=True  # add timestamp to avoid overwrite
+                        )
+                        att_uploaded += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Update Supabase
+        try:
+            update_data = {
+                "conversation_log": conv_log,
+                "reply_count":      (row.get("reply_count") or 0) + 1,
+                "last_reply_at":    now,
+            }
+            if att_uploaded:
+                update_data["attachment_count"] = (row.get("attachment_count") or 0) + att_uploaded
+            supabase.table("quote_requests").update(update_data).eq("id", row["id"]).execute()
+            updated += 1
+        except Exception:
+            pass
+
+    return updated
+
+
+def fetch_unread_emails(service) -> list:
+    """Fetch all unread emails from inbox with full details. Retries on connection errors."""
+    import time
+
+    def execute_with_retry(request, retries=3, delay=2):
+        for attempt in range(retries):
+            try:
+                return request.execute()
+            except Exception as e:
+                if attempt < retries - 1 and ("Broken pipe" in str(e) or "Connection" in str(e) or "reset" in str(e).lower()):
+                    time.sleep(delay)
+                    continue
+                raise
+
+    result = execute_with_retry(
+        service.users().messages().list(userId="me", labelIds=["INBOX", "UNREAD"], maxResults=30)
+    )
+    messages = result.get("messages", [])
+    if not messages:
+        return []
+
+    emails = []
+    for msg in messages:
+        full    = execute_with_retry(service.users().messages().get(userId="me", id=msg["id"]))
         headers = {h["name"]: h["value"] for h in full["payload"]["headers"]}
         body    = decode_body(full["payload"])
         atts    = get_attachments(full["payload"])
@@ -513,8 +666,9 @@ with tab_inbox:
 
     with col_fetch:
         if st.button("📬 Fetch unread emails", type="primary", use_container_width=True):
-            with st.spinner("Connecting to Gmail..."):
+            with st.spinner("Connecting to Gmail... (may retry on connection errors)"):
                 try:
+                    get_gmail_service.clear()  # force fresh connection
                     service     = get_gmail_service()
                     all_emails  = fetch_unread_emails(service)
                     ignored_ids = fetch_ignored_ids(get_supabase())
@@ -524,6 +678,10 @@ with tab_inbox:
                     ignored_count = len(all_emails) - len(st.session_state.emails)
                     if ignored_count:
                         st.caption(f"ℹ️ {ignored_count} ignored email(s) filtered out.")
+                    # Sync sent replies in background
+                    sent_synced = sync_sent_replies(service, get_supabase())
+                    if sent_synced:
+                        st.caption(f"🔄 {sent_synced} sent reply(s) synced to conversation log.")
                 except Exception as e:
                     st.error(f"Gmail error: {e}")
 
