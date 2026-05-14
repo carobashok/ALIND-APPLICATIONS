@@ -989,7 +989,7 @@ with tab_analytics:
             received_ts = None
             sent_ts     = None
             for entry in conv_log:
-                if entry.get("type") == "received" and received_ts is None:
+                if entry.get("type") in ("received", None, "") and received_ts is None:
                     received_ts = entry.get("timestamp")
                 if entry.get("type") == "sent" and sent_ts is None:
                     sent_ts = entry.get("timestamp")
@@ -1070,7 +1070,7 @@ with tab_analytics:
                 received_ts = None
                 sent_ts     = None
                 for entry in conv_log:
-                    if entry.get("type") == "received" and received_ts is None:
+                    if entry.get("type") in ("received", None, "") and received_ts is None:
                         received_ts = entry.get("timestamp")
                     if entry.get("type") == "sent" and sent_ts is None:
                         sent_ts = entry.get("timestamp")
