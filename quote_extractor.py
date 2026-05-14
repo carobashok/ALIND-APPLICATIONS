@@ -574,10 +574,12 @@ def upsert_quote(supabase: Client, service, email: dict, fields: dict) -> tuple[
 
     # Build conversation entry for this message
     conv_entry = {
+        "message_id": email.get("id", ""),
         "sender":    email["sender"],
         "timestamp": now,
         "subject":   email["subject"],
         "body":      email["body"][:2000],
+        "type":      "received",
     }
 
     # Check if thread already exists
@@ -650,7 +652,7 @@ st.set_page_config(
 st.title("📬 Quote Request Extractor")
 st.caption("Carob Technologies · Gmail → Claude → Supabase")
 
-tab_inbox, tab_quotes = st.tabs(["📬 Inbox", "📋 Quote Requests"])
+tab_inbox, tab_quotes, tab_analytics = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics"])
 
 
 # ── Tab 1: Inbox ───────────────────────────────────────────────────────────────
@@ -933,3 +935,166 @@ with tab_quotes:
                         st.markdown(f"{align} **{name}** · *{timestamp}* · _{subject}_")
                         st.text(body[:500] + ("..." if len(body) > 500 else ""))
                         st.markdown("---")
+
+
+# ── Tab 3: Analytics ───────────────────────────────────────────────────────────
+
+with tab_analytics:
+    supabase = get_supabase()
+
+    # Date filter
+    col_f1, col_f2 = st.columns([3, 1])
+    with col_f1:
+        st.markdown("### 📊 Quote Analytics")
+    with col_f2:
+        period = st.selectbox("Period", ["Last 30 days", "All time"], label_visibility="collapsed")
+
+    # Fetch all records
+    try:
+        rows = supabase.table("quote_requests").select("*").order("created_at", desc=True).execute().data
+    except Exception as e:
+        st.error(f"Could not load data: {e}")
+        rows = []
+
+    if not rows:
+        st.info("No quote requests found.")
+    else:
+        from datetime import timedelta
+        import pandas as pd
+
+        # Convert to DataFrame
+        df = pd.DataFrame(rows)
+        df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
+
+        # Apply period filter for KPIs
+        if period == "Last 30 days":
+            cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+            df_filtered = df[df["created_at"] >= cutoff]
+        else:
+            df_filtered = df
+
+        # ── KPI Cards ─────────────────────────────────────────────────────────
+
+        total   = len(df_filtered)
+        won     = len(df_filtered[df_filtered["status"] == "won"])
+        lost    = len(df_filtered[df_filtered["status"] == "lost"])
+        pending = len(df_filtered[df_filtered["status"].isin(["new", "quoted"])])
+
+        # Avg response time — from conversation_log
+        response_times = []
+        for _, row in df_filtered.iterrows():
+            conv_log = row.get("conversation_log") or []
+            if not conv_log:
+                continue
+            received_ts = None
+            sent_ts     = None
+            for entry in conv_log:
+                if entry.get("type") == "received" and received_ts is None:
+                    received_ts = entry.get("timestamp")
+                if entry.get("type") == "sent" and sent_ts is None:
+                    sent_ts = entry.get("timestamp")
+            if received_ts and sent_ts:
+                try:
+                    t1 = pd.to_datetime(received_ts, utc=True)
+                    t2 = pd.to_datetime(sent_ts, utc=True)
+                    diff_hours = (t2 - t1).total_seconds() / 3600
+                    if diff_hours >= 0:
+                        response_times.append(diff_hours)
+                except Exception:
+                    pass
+
+        avg_response = f"{sum(response_times)/len(response_times):.1f} hrs" if response_times else "—"
+
+        # Display KPI cards
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("📥 Total Quotes", total)
+        k2.metric("🟢 Won",          won)
+        k3.metric("🔴 Lost",         lost)
+        k4.metric("🔵 Pending",      pending)
+        k5.metric("⏱ Avg Response",  avg_response)
+
+        st.divider()
+
+        # ── Charts ────────────────────────────────────────────────────────────
+
+        col_chart1, col_chart2 = st.columns(2)
+
+        with col_chart1:
+            st.markdown("**📈 Quote Volume — Last 30 days**")
+            cutoff30 = datetime.now(timezone.utc) - timedelta(days=30)
+            df30 = df[df["created_at"] >= cutoff30].copy()
+            if not df30.empty:
+                df30["date"] = df30["created_at"].dt.date
+                vol = df30.groupby("date").size().reset_index(name="count")
+                vol["date"] = vol["date"].astype(str)
+                st.bar_chart(vol.set_index("date")["count"])
+            else:
+                st.info("No data for last 30 days.")
+
+        with col_chart2:
+            st.markdown("**🔴 Urgency Distribution**")
+            if not df_filtered.empty:
+                urgency_counts = df_filtered["urgency_level"].value_counts()
+                st.bar_chart(urgency_counts)
+            else:
+                st.info("No data.")
+
+        st.divider()
+
+        # ── Conversion Funnel ─────────────────────────────────────────────────
+
+        st.markdown("**🔄 Conversion Pipeline**")
+        funnel_data = {
+            "New":    len(df_filtered[df_filtered["status"] == "new"]),
+            "Quoted": len(df_filtered[df_filtered["status"] == "quoted"]),
+            "Won":    won,
+            "Lost":   lost,
+        }
+        funnel_df = pd.DataFrame(list(funnel_data.items()), columns=["Stage", "Count"])
+        st.bar_chart(funnel_df.set_index("Stage"))
+
+        st.divider()
+
+        # ── Detail Table — Last 30 days ───────────────────────────────────────
+
+        st.markdown("**📋 Quote Detail — Last 30 days**")
+        cutoff30 = datetime.now(timezone.utc) - timedelta(days=30)
+        df_detail = df[df["created_at"] >= cutoff30].copy()
+
+        if df_detail.empty:
+            st.info("No quotes in the last 30 days.")
+        else:
+            table_rows = []
+            for _, row in df_detail.iterrows():
+                conv_log    = row.get("conversation_log") or []
+                received_ts = None
+                sent_ts     = None
+                for entry in conv_log:
+                    if entry.get("type") == "received" and received_ts is None:
+                        received_ts = entry.get("timestamp")
+                    if entry.get("type") == "sent" and sent_ts is None:
+                        sent_ts = entry.get("timestamp")
+
+                # Response time
+                if received_ts and sent_ts:
+                    try:
+                        t1 = pd.to_datetime(received_ts, utc=True)
+                        t2 = pd.to_datetime(sent_ts, utc=True)
+                        diff = (t2 - t1).total_seconds() / 3600
+                        resp_str = f"{diff:.1f} hrs" if diff >= 0 else "—"
+                    except Exception:
+                        resp_str = "—"
+                else:
+                    resp_str = "Not replied yet"
+
+                table_rows.append({
+                    "Customer Email":   row.get("customer_email") or "—",
+                    "Product/Service":  (row.get("product_description") or "—")[:50],
+                    "Date of Request":  row.get("created_at").strftime("%d %b %Y") if pd.notnull(row.get("created_at")) else "—",
+                    "Date of Reply":    pd.to_datetime(sent_ts, utc=True).strftime("%d %b %Y") if sent_ts else "—",
+                    "Response Time":    resp_str,
+                    "Status":           row.get("status", "—"),
+                })
+
+            detail_df = pd.DataFrame(table_rows)
+            st.dataframe(detail_df, use_container_width=True, hide_index=True)
