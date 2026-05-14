@@ -6,7 +6,7 @@ Streamlit app: Fetch Gmail → Select emails → Extract with Claude → Store i
 Install:
     pip install streamlit google-auth google-auth-oauthlib
                 google-auth-httplib2 google-api-python-client
-                anthropic supabase
+                anthropic supabase openpyxl
 
 Secrets (.streamlit/secrets.toml):
     ANTHROPIC_API_KEY = "sk-ant-..."
@@ -33,12 +33,17 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 import anthropic
 from supabase import create_client, Client
+from googleapiclient.http import MediaIoBaseUpload
+import io
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/drive",
 ]
 
 
@@ -65,6 +70,8 @@ From: {sender}
 Email body:
 {body}"""
 
+GDRIVE_PARENT_FOLDER_ID = "1-_h8dWRpGQPMpRUxqUxRn3xmrYCG6pur"  # ALIND QUOTES
+
 STATUS_OPTIONS = ["new", "quoted", "won", "lost"]
 STATUS_COLORS  = {"new": "🔵", "quoted": "🟡", "won": "🟢", "lost": "🔴"}
 URGENCY_ICONS  = {"high": "🔴", "medium": "🟡", "low": "🟢"}
@@ -77,6 +84,172 @@ def get_supabase() -> Client:
     url = st.secrets["supabase"]["url"]
     key = st.secrets["supabase"]["key"]
     return create_client(url, key)
+
+
+# ── Google Drive ──────────────────────────────────────────────────────────────
+
+@st.cache_resource
+def get_drive_service():
+    """Build Drive service using same Gmail OAuth credentials (Drive scope included)."""
+    gmail_secret = dict(st.secrets["gmail"])
+    creds = Credentials(
+        token=None,
+        refresh_token=gmail_secret["refresh_token"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=gmail_secret["client_id"],
+        client_secret=gmail_secret["client_secret"],
+        scopes=SCOPES,
+    )
+    if not creds.valid:
+        creds.refresh(Request())
+    return build("drive", "v3", credentials=creds)
+
+
+def create_drive_folder(drive_service, folder_name: str) -> tuple[str, str]:
+    """Create subfolder inside ALIND QUOTES. Returns (folder_id, folder_url)."""
+    meta = {
+        "name":     folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents":  [GDRIVE_PARENT_FOLDER_ID],
+    }
+    folder = drive_service.files().create(body=meta, fields="id").execute()
+    folder_id  = folder.get("id")
+    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+    return folder_id, folder_url
+
+
+def upload_bytes_to_drive(drive_service, folder_id: str, filename: str, data: bytes, mime_type: str):
+    """Upload raw bytes to a Drive folder."""
+    meta  = {"name": filename, "parents": [folder_id]}
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime_type or "application/octet-stream")
+    drive_service.files().create(body=meta, media_body=media, fields="id").execute()
+
+
+def generate_quote_excel(email: dict, fields: dict) -> bytes:
+    """Generate a formatted Excel summary for a quote request. Returns bytes."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Quote Request"
+
+    # Styles
+    header_font   = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+    header_fill   = PatternFill("solid", fgColor="1F4E79")
+    label_font    = Font(name="Arial", bold=True, color="1F4E79", size=10)
+    value_font    = Font(name="Arial", size=10)
+    section_font  = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    section_fill  = PatternFill("solid", fgColor="2E75B6")
+    alt_fill      = PatternFill("solid", fgColor="D6E4F0")
+    thin          = Side(style="thin", color="CCCCCC")
+    border        = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center        = Alignment(horizontal="center", vertical="center")
+    left          = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+
+    # Column widths
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 50
+
+    # Title row
+    ws.merge_cells("A1:B1")
+    ws["A1"] = "QUOTE REQUEST — CAROB TECHNOLOGIES"
+    ws["A1"].font      = header_font
+    ws["A1"].fill      = header_fill
+    ws["A1"].alignment = center
+    ws.row_dimensions[1].height = 28
+
+    # Generated date
+    ws.merge_cells("A2:B2")
+    ws["A2"] = f"Generated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}"
+    ws["A2"].font      = Font(name="Arial", italic=True, size=9, color="595959")
+    ws["A2"].alignment = center
+    ws.row_dimensions[2].height = 16
+
+    def section_row(row, title):
+        ws.merge_cells(f"A{row}:B{row}")
+        ws[f"A{row}"]           = title
+        ws[f"A{row}"].font      = section_font
+        ws[f"A{row}"].fill      = section_fill
+        ws[f"A{row}"].alignment = left
+        ws.row_dimensions[row].height = 18
+
+    def data_row(row, label, value, shade=False):
+        ws[f"A{row}"]           = label
+        ws[f"A{row}"].font      = label_font
+        ws[f"A{row}"].alignment = left
+        ws[f"A{row}"].border    = border
+        ws[f"B{row}"]           = value or "—"
+        ws[f"B{row}"].font      = value_font
+        ws[f"B{row}"].alignment = left
+        ws[f"B{row}"].border    = border
+        if shade:
+            ws[f"A{row}"].fill = alt_fill
+            ws[f"B{row}"].fill = alt_fill
+        ws.row_dimensions[row].height = 18
+
+    # Customer section
+    section_row(4, "CUSTOMER INFORMATION")
+    data_row(5,  "Customer Name",    fields.get("customer_name"),  False)
+    data_row(6,  "Email Address",    fields.get("customer_email"), True)
+    data_row(7,  "Company",          fields.get("company_name"),   False)
+    data_row(8,  "Phone",            fields.get("phone"),          True)
+
+    # Request section
+    section_row(10, "QUOTE REQUEST DETAILS")
+    data_row(11, "Product / Service",   fields.get("product_description"), False)
+    data_row(12, "Quantity",            f"{fields.get('quantity') or '—'} {fields.get('unit') or ''}".strip(), True)
+    data_row(13, "Deadline",            fields.get("deadline"),    False)
+    data_row(14, "Location",            fields.get("location"),    True)
+    data_row(15, "Urgency Level",       fields.get("urgency_level"), False)
+    data_row(16, "Notes",               fields.get("notes"),       True)
+
+    # Email section
+    section_row(18, "EMAIL DETAILS")
+    data_row(19, "Subject",    email.get("subject"),  False)
+    data_row(20, "From",       email.get("sender"),   True)
+    data_row(21, "Received",   email.get("date"),     False)
+
+    # AI section
+    section_row(23, "AI ASSESSMENT")
+    data_row(24, "Needs Review", "Yes — please verify" if fields.get("needs_review") else "No", False)
+    data_row(25, "Extracted by", "Claude AI (Anthropic) via Carob Technologies", True)
+
+    # Save to bytes
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+def save_to_drive(service, email: dict, fields: dict) -> tuple[str, int]:
+    """Create Drive folder, upload attachments + Excel. Returns (folder_url, att_count)."""
+    try:
+        drive_service = get_drive_service()
+        date_str      = datetime.now().strftime("%Y-%m-%d")
+        safe_name     = re.sub('[^a-zA-Z0-9 _-]', '', fields.get('customer_name') or 'Unknown').strip().replace(' ', '_')
+        folder_name   = f"{date_str}_{safe_name}"
+        folder_id, folder_url = create_drive_folder(drive_service, folder_name)
+
+        # Upload Excel summary
+        excel_bytes = generate_quote_excel(email, fields)
+        upload_bytes_to_drive(drive_service, folder_id, "Quote_Summary.xlsx", excel_bytes,
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        # Upload email attachments
+        att_count = 0
+        for att in email.get("attachments", []):
+            if not att.get("attachment_id"):
+                continue
+            try:
+                data = download_attachment(service, email["id"], att["attachment_id"])
+                upload_bytes_to_drive(drive_service, folder_id, att["filename"], data, att.get("mime_type", ""))
+                att_count += 1
+            except Exception as e:
+                st.warning(f"Could not upload {att['filename']}: {e}")
+
+        return folder_url, att_count
+
+    except Exception as e:
+        st.error(f"Google Drive error: {e}")
+        return "", 0
 
 
 # ── Ignored Emails ────────────────────────────────────────────────────────────
@@ -166,10 +339,7 @@ def download_attachment(service, message_id: str, attachment_id: str) -> bytes:
     return base64.urlsafe_b64decode(data)
 
 
-def save_attachments(service, email: dict, customer_name: str) -> tuple[str, int]:
-    """Attachment saving — Google Drive integration coming soon."""
-    attachments = email.get("attachments", [])
-    return "", len(attachments)
+
 
 
 def fetch_unread_emails(service) -> list:
@@ -282,9 +452,8 @@ def upsert_quote(supabase: Client, service, email: dict, fields: dict) -> tuple[
         except Exception as e:
             return False, str(e)
     else:
-        # New thread — save attachments and insert
-        customer_name = fields.get("customer_name") or "Unknown"
-        folder_path, att_count = save_attachments(service, email, customer_name)
+        # New thread — save to Drive (attachments + Excel) and insert
+        folder_path, att_count = save_to_drive(service, email, fields)
 
         row = {
             "thread_id":           thread_id or None,
@@ -552,7 +721,9 @@ with tab_quotes:
 
                     if row.get("attachment_folder"):
                         st.markdown("**Attachments**")
-                        st.write(f"📎 {row.get('attachment_count', 0)} attachment(s) — Drive integration coming soon")
+                        if row.get("attachment_folder"):
+                            st.markdown(f"[📁 Open in Google Drive]({row['attachment_folder']})")
+                        st.write(f"📎 {row.get('attachment_count', 0)} attachment(s) + Quote_Summary.xlsx")
 
                 with right:
                     st.markdown("**AI Assessment**")
