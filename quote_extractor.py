@@ -153,23 +153,15 @@ def upload_bytes_to_drive(drive_service, folder_id: str, filename: str, data: by
     drive_service.files().create(body=meta, media_body=media, fields="id").execute()
 
 
-def generate_quote_excel(email: dict, fields: dict) -> bytes:
+def generate_quote_excel(email: dict, fields: dict, folder_url: str = "") -> bytes:
     """
     Fill customer details into template.xltx if available,
     otherwise generate a simple summary Excel. Returns bytes.
     """
-    # Try multiple possible paths for the template
+    # Find template file — any .xltx in current directory
     import glob
-    possible_paths = [
-        "template.xltx",
-        "./template.xltx",
-        os.path.join(os.path.dirname(__file__), "template.xltx"),
-    ]
-    template_path = None
-    for p in possible_paths:
-        if os.path.exists(p):
-            template_path = p
-            break
+    xltx_files = glob.glob("*.xltx")
+    template_path = xltx_files[0] if xltx_files else None
 
     if template_path:
         # Load the customer template and fill WORK OUT sheet
@@ -178,29 +170,44 @@ def generate_quote_excel(email: dict, fields: dict) -> bytes:
         if "Qtn_table1" in wb.sheetnames:
             ws = wb["Qtn_table1"]
 
-            # Mail Date — L4
+            # Mail Date — L4 (not merged)
             ws["L4"] = datetime.now().strftime("%d-%b-%Y")
 
-            # Mail ID (customer email) — L6
+            # Mail ID (customer email) — L6 (not merged)
             ws["L6"] = fields.get("customer_email") or ""
 
-            # Company Name — L8
-            ws["L8"] = fields.get("company_name") or fields.get("customer_name") or ""
+            # Company Name — K8 (K8:M8 is merged, write to top-left K8)
+            ws["K8"] = fields.get("company_name") or fields.get("customer_name") or ""
 
-            # Address (customer location) — L10
+            # Address — L10 (not merged)
             ws["L10"] = fields.get("location") or ""
 
-            # Contact Person Name — L15
+            # Contact Person Name — L15 (not merged)
             ws["L15"] = fields.get("customer_name") or ""
 
-            # Phone Numbers — L17
+            # Phone Numbers — L17 (not merged)
             ws["L17"] = fields.get("phone") or ""
 
-            # Quote To (left side customer block) — C9
-            customer_name    = fields.get("customer_name") or ""
-            company_name     = fields.get("company_name") or ""
+            # Quote To left side — C9 (K9:O9 merged, C9 is separate)
+            customer_name = fields.get("customer_name") or ""
+            company_name  = fields.get("company_name") or ""
             ws["C9"]  = company_name or customer_name
             ws["C10"] = fields.get("location") or ""
+
+        # Also fill WORK OUT sheet — feeds into Fallow up sheet via formulas
+        if "WORK OUT" in wb.sheetnames:
+            wo = wb["WORK OUT"]
+            wo["N2"] = fields.get("customer_name") or ""   # Kind Attn → Fallow up E3
+            wo["N3"] = fields.get("phone") or ""           # Phone     → Fallow up F3
+            wo["N4"] = fields.get("customer_email") or ""  # Mail ID   → Fallow up G3
+
+        # Fill Fallow up Link column I3 with clickable hyperlink
+        if "Fallow up" in wb.sheetnames and folder_url:
+            from openpyxl.styles import Font as XLFont
+            fu = wb["Fallow up"]
+            fu["I3"] = "Open Folder"
+            fu["I3"].hyperlink = folder_url
+            fu["I3"].font = XLFont(color="0563C1", underline="single", name="Arial", size=10)
 
         # Save to bytes
         buf = io.BytesIO()
@@ -248,7 +255,7 @@ def save_to_drive(service, email: dict, fields: dict) -> tuple[str, int]:
         folder_id, folder_url = create_drive_folder(drive_service, folder_name)
 
         # Upload Excel summary
-        excel_bytes = generate_quote_excel(email, fields)
+        excel_bytes = generate_quote_excel(email, fields, folder_url)
         upload_bytes_to_drive(drive_service, folder_id, "Quote_Template.xlsx", excel_bytes,
                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
@@ -677,7 +684,7 @@ with st.expander("🔧 Debug info"):
     template_exists = os.path.exists("template.xltx")
     st.write(f"template.xltx found: {template_exists}")
 
-tab_inbox, tab_quotes, tab_analytics = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics"])
+tab_inbox, tab_quotes, tab_analytics, tab_followup = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics", "🔔 Follow Up"])
 
 
 # ── Tab 1: Inbox ───────────────────────────────────────────────────────────────
@@ -1129,3 +1136,153 @@ with tab_analytics:
 
             detail_df = pd.DataFrame(table_rows)
             st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+
+# ── Tab 4: Follow Up ───────────────────────────────────────────────────────────
+
+with tab_followup:
+    supabase = get_supabase()
+
+    st.markdown("### 🔔 Follow Up Tracker")
+
+    # Filters
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
+    with col_f1:
+        fu_status_filter = st.selectbox(
+            "Follow Up Status",
+            ["All", "pending", "contacted", "interested"],
+            key="fu_status_filter"
+        )
+    with col_f2:
+        quote_status_filter = st.selectbox(
+            "Quote Status",
+            ["All"] + STATUS_OPTIONS,
+            key="fu_quote_filter"
+        )
+    with col_f3:
+        st.write("")
+        st.button("🔄 Refresh", use_container_width=True, key="fu_refresh")
+
+    # Fetch records
+    try:
+        query = supabase.schema(get_schema()).table("quote_requests").select("*").order("followup_date", desc=False)
+        if fu_status_filter != "All":
+            query = query.eq("followup_status", fu_status_filter)
+        if quote_status_filter != "All":
+            query = query.eq("status", quote_status_filter)
+        fu_rows = query.execute().data
+    except Exception as e:
+        st.error(f"Could not load follow-up data: {e}")
+        fu_rows = []
+
+    FOLLOWUP_COLORS = {
+        "pending":    "🟡",
+        "contacted":  "🔵",
+        "interested": "🟢",
+    }
+
+    if not fu_rows:
+        st.info("No follow-up records found.")
+    else:
+        # Summary counts
+        c1, c2, c3 = st.columns(3)
+        c1.metric("🟡 Pending",    sum(1 for r in fu_rows if r.get("followup_status") == "pending"))
+        c2.metric("🔵 Contacted",  sum(1 for r in fu_rows if r.get("followup_status") == "contacted"))
+        c3.metric("🟢 Interested", sum(1 for r in fu_rows if r.get("followup_status") == "interested"))
+
+        st.divider()
+
+        # Due today / overdue highlight
+        from datetime import date
+        today = date.today()
+
+        for row in fu_rows:
+            fu_status   = row.get("followup_status", "pending")
+            fu_date     = row.get("followup_date")
+            fu_icon     = FOLLOWUP_COLORS.get(fu_status, "⚪")
+            q_status    = row.get("status", "new")
+            q_icon      = STATUS_COLORS.get(q_status, "⚪")
+            customer    = row.get("customer_email") or row.get("customer_name") or "Unknown"
+            product     = (row.get("product_description") or "")[:45]
+            notes_log   = row.get("followup_notes") or []
+
+            # Date display
+            if fu_date:
+                fu_date_obj = date.fromisoformat(fu_date) if isinstance(fu_date, str) else fu_date
+                if fu_date_obj < today:
+                    date_label = f"⚠️ Overdue: {fu_date}"
+                elif fu_date_obj == today:
+                    date_label = f"🔴 Due Today: {fu_date}"
+                else:
+                    date_label = f"📅 {fu_date}"
+            else:
+                date_label = "No date set"
+
+            label = f"{fu_icon} {customer} — {product} | {q_icon} {q_status} | {date_label}"
+
+            with st.expander(label):
+                left, right = st.columns(2)
+
+                with left:
+                    st.markdown("**Customer**")
+                    st.write(f"Name    : {row.get('customer_name') or '—'}")
+                    st.write(f"Email   : {row.get('customer_email') or '—'}")
+                    st.write(f"Company : {row.get('company_name') or '—'}")
+                    st.write(f"Phone   : {row.get('phone') or '—'}")
+                    st.markdown("**Quote**")
+                    st.write(f"Product  : {row.get('product_description') or '—'}")
+                    st.write(f"Status   : {q_icon} {q_status}")
+                    if row.get("attachment_folder"):
+                        st.markdown(f"[📁 Open in Drive]({row['attachment_folder']})")
+
+                with right:
+                    st.markdown("**Update Follow Up**")
+
+                    new_fu_status = st.selectbox(
+                        "Follow Up Status",
+                        ["pending", "contacted", "interested"],
+                        index=["pending", "contacted", "interested"].index(fu_status) if fu_status in ["pending", "contacted", "interested"] else 0,
+                        key=f"fu_status_{row['id']}",
+                    )
+
+                    new_fu_date = st.date_input(
+                        "Next Follow Up Date",
+                        value=date.fromisoformat(fu_date) if fu_date and isinstance(fu_date, str) else (fu_date if fu_date else today),
+                        key=f"fu_date_{row['id']}",
+                    )
+
+                    new_note = st.text_input(
+                        "Add note (call/email summary)",
+                        placeholder="e.g. Called — will revert by Friday",
+                        key=f"fu_note_{row['id']}",
+                    )
+
+                    if st.button("💾 Save", key=f"fu_save_{row['id']}", type="primary"):
+                        update_data = {
+                            "followup_status": new_fu_status,
+                            "followup_date":   new_fu_date.isoformat(),
+                        }
+                        if new_note.strip():
+                            notes_log.append({
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "note":      new_note.strip(),
+                                "status":    new_fu_status,
+                            })
+                            update_data["followup_notes"] = notes_log
+                        try:
+                            supabase.schema(get_schema()).table("quote_requests").update(update_data).eq("id", row["id"]).execute()
+                            st.success("Saved!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Save failed: {e}")
+
+                # Follow up history
+                if notes_log:
+                    st.markdown("---")
+                    st.markdown(f"**📋 Follow Up History ({len(notes_log)} entries)**")
+                    for entry in reversed(notes_log):
+                        ts     = entry.get("timestamp", "")[:16].replace("T", " ")
+                        status = entry.get("status", "")
+                        note   = entry.get("note", "")
+                        icon   = FOLLOWUP_COLORS.get(status, "⚪")
+                        st.markdown(f"{icon} **{ts}** — {note}")
