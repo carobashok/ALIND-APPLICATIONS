@@ -676,6 +676,12 @@ st.set_page_config(
 st.title("📬 Quote Request Extractor")
 st.caption(f"{get_app_name()} · Gmail → Claude → Supabase")
 
+# DEBUG — remove after testing
+with st.expander("🔧 Debug info"):
+    st.write(f"SCHEMA: {get_schema()}")
+    st.write(f"APP_NAME: {get_app_name()}")
+    st.write(f"GDRIVE_FOLDER_ID: {get_drive_folder_id()}")
+
 tab_inbox, tab_quotes, tab_analytics = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics"])
 
 
