@@ -88,17 +88,26 @@ def get_supabase() -> Client:
 
 def get_schema() -> str:
     """Return schema name from secrets. Defaults to 'public'."""
-    return st.secrets.get("SCHEMA", "public")
+    try:
+        return st.secrets["SCHEMA"]
+    except Exception:
+        return "public"
 
 
 def get_drive_folder_id() -> str:
     """Return Google Drive parent folder ID from secrets."""
-    return st.secrets.get("GDRIVE_FOLDER_ID", "")
+    try:
+        return st.secrets["GDRIVE_FOLDER_ID"]
+    except Exception:
+        return ""
 
 
 def get_app_name() -> str:
     """Return app display name from secrets."""
-    return st.secrets.get("APP_NAME", "Carob Technologies")
+    try:
+        return st.secrets["APP_NAME"]
+    except Exception:
+        return "Carob Technologies"
 
 
 # ── Google Drive ──────────────────────────────────────────────────────────────
