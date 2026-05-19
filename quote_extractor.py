@@ -70,7 +70,7 @@ From: {sender}
 Email body:
 {body}"""
 
-GDRIVE_PARENT_FOLDER_ID = "1-_h8dWRpGQPMpRUxqUxRn3xmrYCG6pur"  # ALIND QUOTES
+# Drive folder and schema read from secrets at runtime
 
 STATUS_OPTIONS = ["new", "quoted", "won", "lost", "not_relevant", "not_feasible"]
 STATUS_COLORS  = {"new": "🔵", "quoted": "🟡", "won": "🟢", "lost": "🔴", "not_relevant": "⚫", "not_feasible": "🟤"}
@@ -84,6 +84,21 @@ def get_supabase() -> Client:
     url = st.secrets["supabase"]["url"]
     key = st.secrets["supabase"]["key"]
     return create_client(url, key)
+
+
+def get_schema() -> str:
+    """Return schema name from secrets. Defaults to 'public'."""
+    return st.secrets.get("SCHEMA", "public")
+
+
+def get_drive_folder_id() -> str:
+    """Return Google Drive parent folder ID from secrets."""
+    return st.secrets.get("GDRIVE_FOLDER_ID", "")
+
+
+def get_app_name() -> str:
+    """Return app display name from secrets."""
+    return st.secrets.get("APP_NAME", "Carob Technologies")
 
 
 # ── Google Drive ──────────────────────────────────────────────────────────────
@@ -110,7 +125,7 @@ def create_drive_folder(drive_service, folder_name: str) -> tuple[str, str]:
     meta = {
         "name":     folder_name,
         "mimeType": "application/vnd.google-apps.folder",
-        "parents":  [GDRIVE_PARENT_FOLDER_ID],
+        "parents":  [get_drive_folder_id()],
     }
     folder = drive_service.files().create(body=meta, fields="id").execute()
     folder_id  = folder.get("id")
@@ -261,7 +276,7 @@ def save_to_drive(service, email: dict, fields: dict) -> tuple[str, int]:
 def fetch_ignored_ids(supabase: Client) -> set:
     """Return set of message IDs that should be filtered out."""
     try:
-        res = supabase.table("ignored_emails").select("message_id").execute()
+        res = supabase.schema(get_schema()).table("ignored_emails").select("message_id").execute()
         return {row["message_id"] for row in res.data}
     except Exception:
         return set()
@@ -270,7 +285,7 @@ def fetch_ignored_ids(supabase: Client) -> set:
 def ignore_email(supabase: Client, email: dict):
     """Save a message ID to the ignored_emails table."""
     try:
-        supabase.table("ignored_emails").insert({
+        supabase.schema(get_schema()).table("ignored_emails").insert({
             "message_id": email["id"],
             "sender":     email["sender"],
             "subject":    email["subject"],
@@ -403,7 +418,7 @@ def sync_sent_replies(service, supabase: Client) -> int:
     """
     # Get all known thread_ids from Supabase
     try:
-        res = supabase.table("quote_requests").select(
+        res = supabase.schema(get_schema()).table("quote_requests").select(
             "id, thread_id, conversation_log, reply_count, attachment_folder"
         ).not_.is_("thread_id", "null").execute()
         known_threads = {row["thread_id"]: row for row in res.data}
@@ -475,7 +490,7 @@ def sync_sent_replies(service, supabase: Client) -> int:
             }
             if att_uploaded:
                 update_data["attachment_count"] = (row.get("attachment_count") or 0) + att_uploaded
-            supabase.table("quote_requests").update(update_data).eq("id", row["id"]).execute()
+            supabase.schema(get_schema()).table("quote_requests").update(update_data).eq("id", row["id"]).execute()
             updated += 1
         except Exception:
             pass
@@ -586,7 +601,7 @@ def upsert_quote(supabase: Client, service, email: dict, fields: dict) -> tuple[
     existing = None
     if thread_id:
         try:
-            res = supabase.table("quote_requests").select("id, conversation_log, reply_count").eq("thread_id", thread_id).execute()
+            res = supabase.schema(get_schema()).table("quote_requests").select("id, conversation_log, reply_count").eq("thread_id", thread_id).execute()
             if res.data:
                 existing = res.data[0]
         except Exception:
@@ -598,7 +613,7 @@ def upsert_quote(supabase: Client, service, email: dict, fields: dict) -> tuple[
         conv_log.append(conv_entry)
         reply_count = (existing.get("reply_count") or 0) + 1
         try:
-            supabase.table("quote_requests").update({
+            supabase.schema(get_schema()).table("quote_requests").update({
                 "conversation_log": conv_log,
                 "reply_count":      reply_count,
                 "last_reply_at":    now,
@@ -635,7 +650,7 @@ def upsert_quote(supabase: Client, service, email: dict, fields: dict) -> tuple[
             "attachment_count":    att_count,
         }
         try:
-            supabase.table("quote_requests").insert(row).execute()
+            supabase.schema(get_schema()).table("quote_requests").insert(row).execute()
             return True, "inserted"
         except Exception as e:
             return False, str(e)
@@ -650,7 +665,7 @@ st.set_page_config(
 )
 
 st.title("📬 Quote Request Extractor")
-st.caption("Carob Technologies · Gmail → Claude → Supabase")
+st.caption(f"{get_app_name()} · Gmail → Claude → Supabase")
 
 tab_inbox, tab_quotes, tab_analytics = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics"])
 
@@ -833,7 +848,7 @@ with tab_quotes:
         st.button("🔄 Refresh", use_container_width=True, key="refresh_quotes")
 
     try:
-        query = supabase.table("quote_requests").select("*").order("created_at", desc=True)
+        query = supabase.schema(get_schema()).table("quote_requests").select("*").order("created_at", desc=True)
         if status_filter  != "All": query = query.eq("status", status_filter)
         if urgency_filter != "All": query = query.eq("urgency_level", urgency_filter)
         rows = query.execute().data
@@ -904,7 +919,7 @@ with tab_quotes:
                     )
                     if new_status != status:
                         try:
-                            supabase.table("quote_requests").update(
+                            supabase.schema(get_schema()).table("quote_requests").update(
                                 {"status": new_status}
                             ).eq("id", row["id"]).execute()
                             st.success(f"Updated to **{new_status}**")
@@ -951,7 +966,7 @@ with tab_analytics:
 
     # Fetch all records
     try:
-        rows = supabase.table("quote_requests").select("*").order("created_at", desc=True).execute().data
+        rows = supabase.schema(get_schema()).table("quote_requests").select("*").order("created_at", desc=True).execute().data
     except Exception as e:
         st.error(f"Could not load data: {e}")
         rows = []
