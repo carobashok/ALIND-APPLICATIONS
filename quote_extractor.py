@@ -154,97 +154,88 @@ def upload_bytes_to_drive(drive_service, folder_id: str, filename: str, data: by
 
 
 def generate_quote_excel(email: dict, fields: dict) -> bytes:
-    """Generate a formatted Excel summary for a quote request. Returns bytes."""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Quote Request"
+    """
+    Fill customer details into template.xltx if available,
+    otherwise generate a simple summary Excel. Returns bytes.
+    """
+    # Try multiple possible paths for the template
+    import glob
+    possible_paths = [
+        "template.xltx",
+        "./template.xltx",
+        os.path.join(os.path.dirname(__file__), "template.xltx"),
+    ]
+    template_path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            template_path = p
+            break
 
-    # Styles
-    header_font   = Font(name="Arial", bold=True, color="FFFFFF", size=11)
-    header_fill   = PatternFill("solid", fgColor="1F4E79")
-    label_font    = Font(name="Arial", bold=True, color="1F4E79", size=10)
-    value_font    = Font(name="Arial", size=10)
-    section_font  = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-    section_fill  = PatternFill("solid", fgColor="2E75B6")
-    alt_fill      = PatternFill("solid", fgColor="D6E4F0")
-    thin          = Side(style="thin", color="CCCCCC")
-    border        = Border(left=thin, right=thin, top=thin, bottom=thin)
-    center        = Alignment(horizontal="center", vertical="center")
-    left          = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+    if template_path:
+        # Load the customer template and fill WORK OUT sheet
+        wb = openpyxl.load_workbook(template_path)
 
-    # Column widths
-    ws.column_dimensions["A"].width = 28
-    ws.column_dimensions["B"].width = 50
+        if "Qtn_table1" in wb.sheetnames:
+            ws = wb["Qtn_table1"]
 
-    # Title row
-    ws.merge_cells("A1:B1")
-    ws["A1"] = "QUOTE REQUEST — CAROB TECHNOLOGIES"
-    ws["A1"].font      = header_font
-    ws["A1"].fill      = header_fill
-    ws["A1"].alignment = center
-    ws.row_dimensions[1].height = 28
+            # Mail Date — L4
+            ws["L4"] = datetime.now().strftime("%d-%b-%Y")
 
-    # Generated date
-    ws.merge_cells("A2:B2")
-    ws["A2"] = f"Generated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}"
-    ws["A2"].font      = Font(name="Arial", italic=True, size=9, color="595959")
-    ws["A2"].alignment = center
-    ws.row_dimensions[2].height = 16
+            # Mail ID (customer email) — L6
+            ws["L6"] = fields.get("customer_email") or ""
 
-    def section_row(row, title):
-        ws.merge_cells(f"A{row}:B{row}")
-        ws[f"A{row}"]           = title
-        ws[f"A{row}"].font      = section_font
-        ws[f"A{row}"].fill      = section_fill
-        ws[f"A{row}"].alignment = left
-        ws.row_dimensions[row].height = 18
+            # Company Name — L8
+            ws["L8"] = fields.get("company_name") or fields.get("customer_name") or ""
 
-    def data_row(row, label, value, shade=False):
-        ws[f"A{row}"]           = label
-        ws[f"A{row}"].font      = label_font
-        ws[f"A{row}"].alignment = left
-        ws[f"A{row}"].border    = border
-        ws[f"B{row}"]           = value or "—"
-        ws[f"B{row}"].font      = value_font
-        ws[f"B{row}"].alignment = left
-        ws[f"B{row}"].border    = border
-        if shade:
-            ws[f"A{row}"].fill = alt_fill
-            ws[f"B{row}"].fill = alt_fill
-        ws.row_dimensions[row].height = 18
+            # Address (customer location) — L10
+            ws["L10"] = fields.get("location") or ""
 
-    # Customer section
-    section_row(4, "CUSTOMER INFORMATION")
-    data_row(5,  "Customer Name",    fields.get("customer_name"),  False)
-    data_row(6,  "Email Address",    fields.get("customer_email"), True)
-    data_row(7,  "Company",          fields.get("company_name"),   False)
-    data_row(8,  "Phone",            fields.get("phone"),          True)
+            # Contact Person Name — L15
+            ws["L15"] = fields.get("customer_name") or ""
 
-    # Request section
-    section_row(10, "QUOTE REQUEST DETAILS")
-    data_row(11, "Product / Service",   fields.get("product_description"), False)
-    data_row(12, "Quantity",            f"{fields.get('quantity') or '—'} {fields.get('unit') or ''}".strip(), True)
-    data_row(13, "Deadline",            fields.get("deadline"),    False)
-    data_row(14, "Location",            fields.get("location"),    True)
-    data_row(15, "Urgency Level",       fields.get("urgency_level"), False)
-    data_row(16, "Notes",               fields.get("notes"),       True)
+            # Phone Numbers — L17
+            ws["L17"] = fields.get("phone") or ""
 
-    # Email section
-    section_row(18, "EMAIL DETAILS")
-    data_row(19, "Subject",    email.get("subject"),  False)
-    data_row(20, "From",       email.get("sender"),   True)
-    data_row(21, "Received",   email.get("date"),     False)
+            # Quote To (left side customer block) — C9
+            customer_name    = fields.get("customer_name") or ""
+            company_name     = fields.get("company_name") or ""
+            ws["C9"]  = company_name or customer_name
+            ws["C10"] = fields.get("location") or ""
 
-    # AI section
-    section_row(23, "AI ASSESSMENT")
-    data_row(24, "Needs Review", "Yes — please verify" if fields.get("needs_review") else "No", False)
-    data_row(25, "Extracted by", "Claude AI (Anthropic) via Carob Technologies", True)
+        # Save to bytes
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.read()
 
-    # Save to bytes
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
+    else:
+        # Fallback — generate simple summary if template not found
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Quote Request"
+        ws["A1"] = "QUOTE REQUEST SUMMARY"
+        ws["A2"] = f"Generated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}"
+        rows = [
+            ("Customer Name",    fields.get("customer_name")),
+            ("Email",            fields.get("customer_email")),
+            ("Company",          fields.get("company_name")),
+            ("Phone",            fields.get("phone")),
+            ("Product",          fields.get("product_description")),
+            ("Quantity",         f"{fields.get('quantity') or ''} {fields.get('unit') or ''}".strip()),
+            ("Deadline",         fields.get("deadline")),
+            ("Location",         fields.get("location")),
+            ("Urgency",          fields.get("urgency_level")),
+            ("Notes",            fields.get("notes")),
+            ("Email Subject",    email.get("subject")),
+            ("Received From",    email.get("sender")),
+        ]
+        for i, (label, value) in enumerate(rows, start=4):
+            ws[f"A{i}"] = label
+            ws[f"B{i}"] = value or "—"
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.read()
 
 
 def save_to_drive(service, email: dict, fields: dict) -> tuple[str, int]:
@@ -258,7 +249,7 @@ def save_to_drive(service, email: dict, fields: dict) -> tuple[str, int]:
 
         # Upload Excel summary
         excel_bytes = generate_quote_excel(email, fields)
-        upload_bytes_to_drive(drive_service, folder_id, "Quote_Summary.xlsx", excel_bytes,
+        upload_bytes_to_drive(drive_service, folder_id, "Quote_Template.xlsx", excel_bytes,
                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         # Upload email attachments
@@ -681,6 +672,10 @@ with st.expander("🔧 Debug info"):
     st.write(f"SCHEMA: {get_schema()}")
     st.write(f"APP_NAME: {get_app_name()}")
     st.write(f"GDRIVE_FOLDER_ID: {get_drive_folder_id()}")
+    st.write(f"CWD: {os.getcwd()}")
+    st.write(f"Files in CWD: {os.listdir('.')}")
+    template_exists = os.path.exists("template.xltx")
+    st.write(f"template.xltx found: {template_exists}")
 
 tab_inbox, tab_quotes, tab_analytics = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics"])
 
@@ -913,7 +908,7 @@ with tab_quotes:
                         st.markdown("**Attachments**")
                         if row.get("attachment_folder"):
                             st.markdown(f"[📁 Open in Google Drive]({row['attachment_folder']})")
-                        st.write(f"📎 {row.get('attachment_count', 0)} attachment(s) + Quote_Summary.xlsx")
+                        st.write(f"📎 {row.get('attachment_count', 0)} attachment(s) + Quote_Template.xlsx")
 
                 with right:
                     st.markdown("**AI Assessment**")
