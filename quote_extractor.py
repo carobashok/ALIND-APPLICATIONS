@@ -674,15 +674,6 @@ st.set_page_config(
 st.title("📬 Quote Request Extractor")
 st.caption(f"{get_app_name()} · Gmail → Claude → Supabase")
 
-# DEBUG — remove after testing
-with st.expander("🔧 Debug info"):
-    st.write(f"SCHEMA: {get_schema()}")
-    st.write(f"APP_NAME: {get_app_name()}")
-    st.write(f"GDRIVE_FOLDER_ID: {get_drive_folder_id()}")
-    st.write(f"CWD: {os.getcwd()}")
-    st.write(f"Files in CWD: {os.listdir('.')}")
-    template_exists = os.path.exists("template.xltx")
-    st.write(f"template.xltx found: {template_exists}")
 
 tab_inbox, tab_quotes, tab_analytics, tab_followup = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics", "🔔 Follow Up"])
 
