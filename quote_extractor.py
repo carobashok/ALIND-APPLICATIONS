@@ -72,8 +72,8 @@ Email body:
 
 GDRIVE_PARENT_FOLDER_ID = "1-_h8dWRpGQPMpRUxqUxRn3xmrYCG6pur"  # ALIND QUOTES
 
-STATUS_OPTIONS = ["new", "quoted", "won", "lost"]
-STATUS_COLORS  = {"new": "🔵", "quoted": "🟡", "won": "🟢", "lost": "🔴"}
+STATUS_OPTIONS = ["new", "quoted", "won", "lost", "not_relevant", "not_feasible"]
+STATUS_COLORS  = {"new": "🔵", "quoted": "🟡", "won": "🟢", "lost": "🔴", "not_relevant": "⚫", "not_feasible": "🟤"}
 URGENCY_ICONS  = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
 
@@ -979,6 +979,8 @@ with tab_analytics:
         won     = len(df_filtered[df_filtered["status"] == "won"])
         lost    = len(df_filtered[df_filtered["status"] == "lost"])
         pending = len(df_filtered[df_filtered["status"].isin(["new", "quoted"])])
+        not_relevant = len(df_filtered[df_filtered["status"] == "not_relevant"])
+        not_feasible = len(df_filtered[df_filtered["status"] == "not_feasible"])
 
         # Avg response time — from conversation_log
         response_times = []
@@ -1006,12 +1008,14 @@ with tab_analytics:
         avg_response = f"{sum(response_times)/len(response_times):.1f} hrs" if response_times else "—"
 
         # Display KPI cards
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("📥 Total Quotes", total)
-        k2.metric("🟢 Won",          won)
-        k3.metric("🔴 Lost",         lost)
-        k4.metric("🔵 Pending",      pending)
-        k5.metric("⏱ Avg Response",  avg_response)
+        k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+        k1.metric("📥 Total Quotes",   total)
+        k2.metric("🟢 Won",            won)
+        k3.metric("🔴 Lost",           lost)
+        k4.metric("🔵 Pending",        pending)
+        k5.metric("⚫ Not Relevant",   not_relevant)
+        k6.metric("🟤 Not Feasible",   not_feasible)
+        k7.metric("⏱ Avg Response",    avg_response)
 
         st.divider()
 
@@ -1045,10 +1049,12 @@ with tab_analytics:
 
         st.markdown("**🔄 Conversion Pipeline**")
         funnel_data = {
-            "New":    len(df_filtered[df_filtered["status"] == "new"]),
-            "Quoted": len(df_filtered[df_filtered["status"] == "quoted"]),
-            "Won":    won,
-            "Lost":   lost,
+            "New":          len(df_filtered[df_filtered["status"] == "new"]),
+            "Quoted":       len(df_filtered[df_filtered["status"] == "quoted"]),
+            "Won":          won,
+            "Lost":         lost,
+            "Not Relevant": not_relevant,
+            "Not Feasible": not_feasible,
         }
         funnel_df = pd.DataFrame(list(funnel_data.items()), columns=["Stage", "Count"])
         st.bar_chart(funnel_df.set_index("Stage"))
