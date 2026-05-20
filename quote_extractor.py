@@ -474,6 +474,30 @@ def fetch_ignored_ids(supabase: Client) -> set:
         return set()
 
 
+def fetch_blocked_patterns(supabase: Client) -> list:
+    """Return list of blocked sender patterns (email or domain)."""
+    try:
+        res = supabase.schema(get_schema()).table("blocked_senders").select("pattern").execute()
+        return [row["pattern"].lower().strip() for row in res.data]
+    except Exception:
+        return []
+
+
+def is_blocked(sender: str, patterns: list) -> bool:
+    """Check if sender matches any blocked pattern."""
+    sender_lower = sender.lower()
+    for pattern in patterns:
+        if pattern.startswith("@"):
+            # Domain block — match any email ending with this domain
+            if pattern in sender_lower:
+                return True
+        else:
+            # Exact email block
+            if pattern in sender_lower:
+                return True
+    return False
+
+
 def ignore_email(supabase: Client, email: dict):
     """Save a message ID to the ignored_emails table."""
     try:
@@ -886,7 +910,7 @@ st.title("📬 Quote Request Extractor")
 st.caption(f"{get_app_name()} · Gmail → Claude → Supabase")
 
 
-tab_inbox, tab_quotes, tab_analytics, tab_followup = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics", "🔔 Follow Up"])
+tab_inbox, tab_quotes, tab_analytics, tab_followup, tab_settings = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics", "🔔 Follow Up", "⚙️ Settings"])
 
 
 # ── Tab 1: Inbox ───────────────────────────────────────────────────────────────
@@ -907,8 +931,13 @@ with tab_inbox:
                     get_gmail_service.clear()  # force fresh connection
                     service     = get_gmail_service()
                     all_emails  = fetch_unread_emails(service)
-                    ignored_ids = fetch_ignored_ids(get_supabase())
-                    st.session_state.emails   = [e for e in all_emails if e["id"] not in ignored_ids]
+                    ignored_ids      = fetch_ignored_ids(get_supabase())
+                    blocked_patterns = fetch_blocked_patterns(get_supabase())
+                    st.session_state.emails   = [
+                        e for e in all_emails
+                        if e["id"] not in ignored_ids
+                        and not is_blocked(e["sender"], blocked_patterns)
+                    ]
                     st.session_state.selected = set()
                     st.session_state.log      = ""
                     ignored_count = len(all_emails) - len(st.session_state.emails)
@@ -1525,3 +1554,108 @@ with tab_followup:
                         note   = entry.get("note", "")
                         icon   = FOLLOWUP_COLORS.get(status, "⚪")
                         st.markdown(f"{icon} **{ts}** — {note}")
+
+
+# ── Tab 5: Settings ────────────────────────────────────────────────────────────
+
+with tab_settings:
+    supabase = get_supabase()
+
+    st.markdown("### ⚙️ Settings")
+
+    # ── Blocked Senders ────────────────────────────────────────────────────────
+    st.markdown("#### 🚫 Blocked Senders")
+    st.caption(
+        "Emails from these addresses or domains will never appear in the Inbox. "
+        "Use @domain.com to block an entire domain (e.g. @linkedin.com)."
+    )
+
+    # Fetch current blocked list
+    try:
+        blocked = supabase.schema(get_schema()).table("blocked_senders").select("*").order("created_at", desc=False).execute().data
+    except Exception as e:
+        st.error(f"Could not load blocked senders: {e}")
+        blocked = []
+
+    # Display existing blocked senders
+    if not blocked:
+        st.info("No blocked senders yet.")
+    else:
+        for b in blocked:
+            col_pattern, col_note, col_del = st.columns([3, 4, 1])
+            with col_pattern:
+                st.code(b.get("pattern", ""), language=None)
+            with col_note:
+                st.caption(b.get("note") or "—")
+            with col_del:
+                if st.button("✕", key=f"del_blocked_{b['id']}", help="Remove this block"):
+                    try:
+                        supabase.schema(get_schema()).table("blocked_senders").delete().eq("id", b["id"]).execute()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not remove: {e}")
+
+    st.divider()
+
+    # Add new blocked sender
+    st.markdown("**Add blocked sender or domain:**")
+    col_add1, col_add2, col_add3 = st.columns([3, 4, 1])
+    with col_add1:
+        new_pattern = st.text_input(
+            "Email or domain",
+            placeholder="e.g. noreply@linkedin.com or @newsletter.com",
+            label_visibility="collapsed",
+            key="new_block_pattern"
+        )
+    with col_add2:
+        new_note = st.text_input(
+            "Note (optional)",
+            placeholder="e.g. LinkedIn notifications",
+            label_visibility="collapsed",
+            key="new_block_note"
+        )
+    with col_add3:
+        if st.button("➕ Add", type="primary", use_container_width=True):
+            if new_pattern.strip():
+                try:
+                    supabase.schema(get_schema()).table("blocked_senders").insert({
+                        "pattern": new_pattern.strip().lower(),
+                        "note":    new_note.strip() or None,
+                    }).execute()
+                    st.success(f"Blocked: {new_pattern.strip()}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not add: {e}")
+            else:
+                st.warning("Please enter an email or domain to block.")
+
+    st.divider()
+
+    # ── Ignored Emails ─────────────────────────────────────────────────────────
+    st.markdown("#### 🙈 Ignored Emails")
+    st.caption("Individual emails you have ignored. These will never reappear in the Inbox.")
+
+    try:
+        ignored = supabase.schema(get_schema()).table("ignored_emails").select("*").order("ignored_at", desc=True).execute().data
+    except Exception as e:
+        st.error(f"Could not load ignored emails: {e}")
+        ignored = []
+
+    if not ignored:
+        st.info("No ignored emails.")
+    else:
+        st.caption(f"{len(ignored)} ignored email(s)")
+        for ig in ignored:
+            col_i1, col_i2, col_i3 = st.columns([3, 4, 1])
+            with col_i1:
+                st.caption(ig.get("sender", "—"))
+            with col_i2:
+                st.caption(ig.get("subject", "—")[:60])
+            with col_i3:
+                if st.button("↩️", key=f"unignore_{ig['id']}", help="Restore this email"):
+                    try:
+                        supabase.schema(get_schema()).table("ignored_emails").delete().eq("id", ig["id"]).execute()
+                        st.success("Restored — will appear on next Fetch.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not restore: {e}")
