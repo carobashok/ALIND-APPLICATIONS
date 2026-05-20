@@ -349,8 +349,9 @@ def generate_quote_excel(email: dict, fields: dict, folder_url: str = "") -> byt
     template_path = xltx_files[0] if xltx_files else None
 
     if template_path:
-        # Load the customer template and fill WORK OUT sheet
-        wb = openpyxl.load_workbook(template_path)
+        # Load the customer template — keep_vba handles xltx conversion
+        wb = openpyxl.load_workbook(template_path, keep_vba=False, data_only=False)
+        wb.template = False  # convert from template to regular workbook
 
         if "Qtn_table1" in wb.sheetnames:
             ws = wb["Qtn_table1"]
@@ -799,7 +800,12 @@ def mark_as_read(service, message_id: str):
 # ── Claude Extraction ──────────────────────────────────────────────────────────
 
 def extract_quote_fields(email: dict) -> dict | None:
-    client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+    try:
+        api_key = st.secrets["ANTHROPIC_API_KEY"]
+    except Exception as e:
+        st.error(f"Missing ANTHROPIC_API_KEY in secrets: {e}")
+        return None
+    client = anthropic.Anthropic(api_key=api_key)
     prompt = EXTRACTION_PROMPT.format(
         subject=email["subject"],
         sender=email["sender"],
@@ -986,7 +992,7 @@ with tab_inbox:
             with col_cb:
                 st.write("")
                 checked = st.checkbox(
-                    "",
+                    "Select",
                     value=is_checked,
                     key=f"chk_{email['id']}",
                     label_visibility="collapsed",
