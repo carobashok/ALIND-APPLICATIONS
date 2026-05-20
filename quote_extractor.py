@@ -110,6 +110,191 @@ def get_app_name() -> str:
         return "Carob Technologies"
 
 
+def get_followup_tracker_id() -> str:
+    """Return Google Drive file ID for Followup_Tracker.xlsx."""
+    try:
+        return st.secrets["FOLLOWUP_TRACKER_ID"]
+    except Exception:
+        return ""
+
+
+# ── Followup Tracker ──────────────────────────────────────────────────────────
+
+def download_tracker_bytes(drive_service) -> bytes | None:
+    """Download Followup_Tracker.xlsx from Drive as bytes."""
+    tracker_id = get_followup_tracker_id()
+    if not tracker_id:
+        return None
+    try:
+        request = drive_service.files().get_media(fileId=tracker_id)
+        buf = io.BytesIO()
+        from googleapiclient.http import MediaIoBaseDownload
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        st.warning(f"Could not download tracker: {e}")
+        return None
+
+
+def upload_tracker_bytes(drive_service, data: bytes):
+    """Overwrite Followup_Tracker.xlsx in Drive with new bytes."""
+    tracker_id = get_followup_tracker_id()
+    if not tracker_id:
+        return
+    try:
+        media = MediaIoBaseUpload(
+            io.BytesIO(data),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            resumable=False
+        )
+        drive_service.files().update(fileId=tracker_id, media_body=media).execute()
+    except Exception as e:
+        st.warning(f"Could not update tracker: {e}")
+
+
+def append_to_tracker(drive_service, row: dict):
+    """Append a new row to Followup_Tracker.xlsx."""
+    data = download_tracker_bytes(drive_service)
+    if not data:
+        return
+    wb  = openpyxl.load_workbook(io.BytesIO(data))
+    ws  = wb.active
+    from openpyxl.styles import Font as XLFont, Alignment as XLAlignment
+    link_font = XLFont(name="Arial", color="0563C1", underline="single", size=10)
+    normal    = XLFont(name="Arial", size=10)
+    left      = XLAlignment(horizontal="left", vertical="center", wrap_text=True)
+
+    next_row = ws.max_row + 1
+    ws.cell(next_row, 1,  value=row.get("date", "")).font       = normal
+    ws.cell(next_row, 2,  value=row.get("customer_name", "")).font   = normal
+    ws.cell(next_row, 3,  value=row.get("company_name", "")).font    = normal
+    ws.cell(next_row, 4,  value=row.get("phone", "")).font           = normal
+    ws.cell(next_row, 5,  value=row.get("customer_email", "")).font  = normal
+    ws.cell(next_row, 6,  value=row.get("product_description", "")).font = normal
+    ws.cell(next_row, 7,  value=row.get("status", "quoted")).font    = normal
+    ws.cell(next_row, 8,  value="pending").font                      = normal
+    ws.cell(next_row, 9,  value="").font                             = normal
+    ws.cell(next_row, 10, value="").font                             = normal
+
+    # Drive link as clickable hyperlink
+    drive_link = row.get("attachment_folder", "")
+    if drive_link:
+        link_cell = ws.cell(next_row, 11, value="Open Folder")
+        link_cell.hyperlink = drive_link
+        link_cell.font      = link_font
+    else:
+        ws.cell(next_row, 11, value="").font = normal
+
+    # Store quote ID in hidden column L for row removal later
+    ws.cell(next_row, 12, value=row.get("id", "")).font = normal
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    upload_tracker_bytes(drive_service, buf.getvalue())
+
+
+def remove_from_tracker(drive_service, quote_id: str):
+    """Remove a row from Followup_Tracker.xlsx by quote ID (column L)."""
+    data = download_tracker_bytes(drive_service)
+    if not data:
+        return
+    wb = openpyxl.load_workbook(io.BytesIO(data))
+    ws = wb.active
+    rows_to_delete = []
+    for row in ws.iter_rows(min_row=2):
+        if str(row[11].value) == str(quote_id):
+            rows_to_delete.append(row[0].row)
+    for r in reversed(rows_to_delete):
+        ws.delete_rows(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    upload_tracker_bytes(drive_service, buf.getvalue())
+
+
+# ── Merge Quotes ──────────────────────────────────────────────────────────────
+
+def merge_quotes(supabase: Client, source_id: str, target_id: str, service) -> bool:
+    """
+    Merge source quote into target quote.
+    - Appends source conversation_log to target
+    - Moves attachments to target Drive folder
+    - Deletes source record from Supabase
+    - Removes source from Followup Tracker
+    """
+    try:
+        # Fetch both records
+        source = supabase.schema(get_schema()).table("quote_requests").select("*").eq("id", source_id).execute().data
+        target = supabase.schema(get_schema()).table("quote_requests").select("*").eq("id", target_id).execute().data
+
+        if not source or not target:
+            return False
+
+        source = source[0]
+        target = target[0]
+
+        # Merge conversation logs
+        source_log = source.get("conversation_log") or []
+        target_log = target.get("conversation_log") or []
+
+        # Tag merged entries
+        for entry in source_log:
+            entry["merged_from"] = source.get("customer_email", "")
+
+        merged_log  = target_log + source_log
+        reply_count = (target.get("reply_count") or 0) + len(source_log)
+
+        # Update target with merged log
+        supabase.schema(get_schema()).table("quote_requests").update({
+            "conversation_log": merged_log,
+            "reply_count":      reply_count,
+            "last_reply_at":    datetime.now(timezone.utc).isoformat(),
+            "needs_review":     True,  # flag for review after merge
+        }).eq("id", target_id).execute()
+
+        # Move attachments to target Drive folder if both have folders
+        source_folder = source.get("attachment_folder", "")
+        target_folder = target.get("attachment_folder", "")
+        if source_folder and target_folder:
+            try:
+                drive_service   = get_drive_service()
+                source_folder_id = source_folder.split("/")[-1]
+                target_folder_id = target_folder.split("/")[-1]
+                # List files in source folder
+                files = drive_service.files().list(
+                    q=f"'{source_folder_id}' in parents",
+                    fields="files(id, name)"
+                ).execute().get("files", [])
+                # Move each file to target folder
+                for f in files:
+                    drive_service.files().update(
+                        fileId=f["id"],
+                        addParents=target_folder_id,
+                        removeParents=source_folder_id,
+                        fields="id"
+                    ).execute()
+            except Exception:
+                pass
+
+        # Remove source from Followup Tracker
+        try:
+            remove_from_tracker(get_drive_service(), source_id)
+        except Exception:
+            pass
+
+        # Delete source record from Supabase
+        supabase.schema(get_schema()).table("quote_requests").delete().eq("id", source_id).execute()
+
+        return True
+
+    except Exception as e:
+        st.error(f"Merge failed: {e}")
+        return False
+
+
 # ── Google Drive ──────────────────────────────────────────────────────────────
 
 @st.cache_resource
@@ -497,10 +682,36 @@ def sync_sent_replies(service, supabase: Client) -> int:
             }
             if att_uploaded:
                 update_data["attachment_count"] = (row.get("attachment_count") or 0) + att_uploaded
+
+            # Auto-set status to quoted if still new
+            current_status = row.get("status", "new")
+            if current_status == "new":
+                update_data["status"] = "quoted"
+
             supabase.schema(get_schema()).table("quote_requests").update(update_data).eq("id", row["id"]).execute()
+
+            # Append to Followup Tracker — only on first reply (reply_count was 0)
+            if (row.get("reply_count") or 0) == 0:
+                try:
+                    drive_service = get_drive_service()
+                    tracker_row = {
+                        "id":                  row["id"],
+                        "date":                datetime.now().strftime("%d-%b-%Y"),
+                        "customer_name":       row.get("customer_name", ""),
+                        "company_name":        row.get("company_name", ""),
+                        "phone":               row.get("phone", ""),
+                        "customer_email":      row.get("sender_email", ""),
+                        "product_description": row.get("product_description", ""),
+                        "status":              "quoted",
+                        "attachment_folder":   row.get("attachment_folder", ""),
+                    }
+                    append_to_tracker(drive_service, tracker_row)
+                except Exception as te:
+                    st.warning(f"Tracker update failed: {te}")
+
             updated += 1
-        except Exception:
-            pass
+        except Exception as e:
+            st.warning(f"Sync error: {e}")
 
     return updated
 
@@ -930,6 +1141,12 @@ with tab_quotes:
                             supabase.schema(get_schema()).table("quote_requests").update(
                                 {"status": new_status}
                             ).eq("id", row["id"]).execute()
+                            # Remove from tracker if closed
+                            if new_status in ["won", "lost", "not_relevant", "not_feasible"]:
+                                try:
+                                    remove_from_tracker(get_drive_service(), row["id"])
+                                except Exception:
+                                    pass
                             st.success(f"Updated to **{new_status}**")
                             st.rerun()
                         except Exception as e:
@@ -940,6 +1157,37 @@ with tab_quotes:
                     st.write(f"**Subject:** {row.get('raw_email_subject') or '—'}")
                     st.write(f"**From:** {row.get('sender_email') or '—'}")
                     st.text(row.get("raw_email_body") or "—")
+
+                # Merge feature
+                with st.expander("🔗 Merge into another quote"):
+                    st.caption("Use this if this email is a follow-up from a different person in the same organisation, related to an existing quote.")
+                    try:
+                        all_quotes = supabase.schema(get_schema()).table("quote_requests").select(
+                            "id, customer_name, customer_email, product_description, created_at"
+                        ).neq("id", row["id"]).order("created_at", desc=True).execute().data
+
+                        if not all_quotes:
+                            st.info("No other quotes to merge into.")
+                        else:
+                            merge_options = {
+                                f"{q.get('customer_name') or q.get('customer_email') or 'Unknown'} — {(q.get('product_description') or '')[:40]} ({q.get('created_at', '')[:10]})": q["id"]
+                                for q in all_quotes
+                            }
+                            selected_label = st.selectbox(
+                                "Select quote to merge into:",
+                                list(merge_options.keys()),
+                                key=f"merge_select_{row['id']}"
+                            )
+                            st.warning(f"This will delete the current record and append its conversation to the selected quote.")
+                            if st.button("🔗 Confirm Merge", key=f"merge_btn_{row['id']}", type="primary"):
+                                target_id = merge_options[selected_label]
+                                service   = get_gmail_service()
+                                ok = merge_quotes(supabase, row["id"], target_id, service)
+                                if ok:
+                                    st.success("Merged successfully!")
+                                    st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not load quotes: {e}")
 
                 # Conversation thread
                 conv_log = row.get("conversation_log") or []
