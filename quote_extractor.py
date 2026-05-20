@@ -1618,12 +1618,21 @@ with tab_settings:
         if st.button("➕ Add", type="primary", use_container_width=True):
             if new_pattern.strip():
                 try:
-                    supabase.schema(get_schema()).table("blocked_senders").insert({
-                        "pattern": new_pattern.strip().lower(),
-                        "note":    new_note.strip() or None,
-                    }).execute()
-                    st.success(f"Blocked: {new_pattern.strip()}")
-                    st.rerun()
+                    # Support comma-separated multiple entries
+                    patterns = [p.strip().lower() for p in new_pattern.split(",") if p.strip()]
+                    added = []
+                    for p in patterns:
+                        try:
+                            supabase.schema(get_schema()).table("blocked_senders").insert({
+                                "pattern": p,
+                                "note":    new_note.strip() or None,
+                            }).execute()
+                            added.append(p)
+                        except Exception:
+                            pass  # skip duplicates silently
+                    if added:
+                        st.success(f"Blocked {len(added)} sender(s): {', '.join(added)}")
+                        st.rerun()
                 except Exception as e:
                     st.error(f"Could not add: {e}")
             else:
