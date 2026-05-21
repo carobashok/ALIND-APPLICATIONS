@@ -756,7 +756,7 @@ def fetch_unread_emails(service) -> list:
                 raise
 
     result = execute_with_retry(
-        service.users().messages().list(userId="me", labelIds=["INBOX", "UNREAD"], maxResults=30)
+        service.users().messages().list(userId="me", labelIds=["INBOX", "UNREAD", "CATEGORY_PRIMARY"], maxResults=30)
     )
     messages = result.get("messages", [])
     if not messages:
