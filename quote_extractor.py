@@ -112,6 +112,14 @@ def get_app_name() -> str:
         return "Carob Technologies"
 
 
+def get_email_provider() -> str:
+    """Return email provider from secrets. Must be explicitly set. Supports: gmail, o365"""
+    if "EMAIL_PROVIDER" not in st.secrets:
+        st.error("EMAIL_PROVIDER is not set in secrets. Please add EMAIL_PROVIDER = \"gmail\" to your secrets.toml.")
+        st.stop()
+    return st.secrets["EMAIL_PROVIDER"].lower()
+
+
 def get_followup_tracker_id() -> str:
     """Return Google Drive file ID for Followup_Tracker.xlsx."""
     try:
@@ -923,6 +931,17 @@ st.set_page_config(
 
 st.title("📬 Quote Request Extractor")
 st.caption(f"{get_app_name()} · Gmail → Claude → Supabase")
+
+# Validate email provider
+_supported_providers = ["gmail"]
+_provider = get_email_provider()
+if _provider not in _supported_providers:
+    st.error(
+        f"EMAIL_PROVIDER = '{_provider}' is not supported yet. "
+        f"Supported providers: {', '.join(_supported_providers)}. "
+        f"Please update your secrets.toml."
+    )
+    st.stop()
 
 
 tab_inbox, tab_quotes, tab_analytics, tab_followup, tab_settings = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics", "📊 Track Status", "⚙️ Settings"])
