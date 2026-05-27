@@ -47,7 +47,7 @@ SCOPES = [
 ]
 
 
-EXTRACTION_PROMPT = """You are a quote request extractor for Carob Technologies, an AI and analytics company based in Chennai, India.
+EXTRACTION_PROMPT = """You are a quote request extractor for {app_name}.
 
 Extract information from the email below and return ONLY a valid JSON object — no explanation, no markdown, no extra text, no code fences.
 
@@ -815,6 +815,7 @@ def extract_quote_fields(email: dict) -> dict | None:
         return None
     client = anthropic.Anthropic(api_key=api_key)
     prompt = EXTRACTION_PROMPT.format(
+        app_name=get_app_name(),
         subject=email["subject"],
         sender=email["sender"],
         body=email["body"][:4000],
