@@ -929,8 +929,8 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("📬 Quote Request Extractor")
-st.caption(f"{get_app_name()} · Gmail → Claude → Supabase")
+st.title("📬 QuoteDesk")
+st.caption(f"Mail to Order · {get_app_name()} · Powered by Carob Technologies")
 
 # Validate email provider
 _supported_providers = ["gmail"]
