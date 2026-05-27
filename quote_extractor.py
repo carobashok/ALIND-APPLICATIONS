@@ -925,7 +925,7 @@ st.title("📬 Quote Request Extractor")
 st.caption(f"{get_app_name()} · Gmail → Claude → Supabase")
 
 
-tab_inbox, tab_quotes, tab_analytics, tab_followup, tab_settings = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics", "🔔 Follow Up", "⚙️ Settings"])
+tab_inbox, tab_quotes, tab_analytics, tab_followup, tab_settings = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics", "📊 Track Status", "⚙️ Settings"])
 
 
 # ── Tab 1: Inbox ───────────────────────────────────────────────────────────────
@@ -1426,7 +1426,7 @@ with tab_analytics:
 with tab_followup:
     supabase = get_supabase()
 
-    st.markdown("### 🔔 Follow Up Tracker")
+    st.markdown("### 📊 Track Status")
 
     # Filters
     col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
