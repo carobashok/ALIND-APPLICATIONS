@@ -1199,7 +1199,7 @@ with tab_quotes:
         st.caption(f"{len(rows)} record(s)")
 
         for row in rows:
-            created     = row.get("created_at", "")[:16].replace("T", " ")
+            created     = to_ist(row.get("created_at", ""))
             status      = row.get("status", "new")
             urgency     = row.get("urgency_level", "medium")
             review      = row.get("needs_review", False)
