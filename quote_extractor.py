@@ -485,9 +485,11 @@ def save_to_drive(service, email: dict, fields: dict) -> tuple[str, int]:
     """Create Drive folder, upload attachments in subfolder + Excel. Returns (folder_url, att_count)."""
     try:
         drive_service = get_drive_service()
-        dt_str        = datetime.now().strftime("%Y-%m-%d_%H%M")
-        safe_name     = re.sub("[^a-zA-Z0-9 _-]", "", fields.get("customer_name") or "Unknown").strip().replace(" ", "_")
-        folder_name   = f"{dt_str}_{safe_name}"
+        date_str    = datetime.now().strftime("%Y-%m-%d")
+        # Use company name if available, else email ID, then customer name
+        name_part   = fields.get("company_name") or fields.get("customer_email") or fields.get("customer_name") or "Unknown"
+        safe_name   = re.sub("[^a-zA-Z0-9 _@.-]", "", name_part).strip().replace(" ", "_").replace("@", "_").replace(".", "_")
+        folder_name = f"{safe_name}_{date_str}"
         folder_id, folder_url = create_drive_folder(drive_service, folder_name)
 
         # Upload Quote Template at root of quote folder
@@ -1227,7 +1229,7 @@ with tab_quotes:
                     if row.get("notes"):
                         st.write(f"Notes : {row['notes']}")
                     if row.get("last_reply_at"):
-                        st.write(f"Last reply   : {row['last_reply_at'][:16].replace('T',' ')}")
+                        st.write(f"Last reply   : {to_ist(row.get('last_reply_at', ''))}")
 
                     st.markdown("**Update Status**")
                     new_status = st.selectbox(
@@ -1468,7 +1470,7 @@ with tab_analytics:
                 table_rows.append({
                     "Customer Email":   row.get("customer_email") or "—",
                     "Product/Service":  (row.get("product_description") or "—")[:50],
-                    "Date of Request":  row.get("created_at").strftime("%d %b %Y") if pd.notnull(row.get("created_at")) else "—",
+                    "Date of Request":  to_ist(str(row.get("created_at", ""))).split(",")[0] if row.get("created_at") else "—",
                     "Date of Reply":    pd.to_datetime(sent_ts, utc=True).strftime("%d %b %Y") if sent_ts else "—",
                     "Response Time":    resp_str,
                     "Status":           row.get("status", "—"),
@@ -1621,7 +1623,7 @@ with tab_followup:
                     st.markdown("---")
                     st.markdown(f"**📋 Follow Up History ({len(notes_log)} entries)**")
                     for entry in reversed(notes_log):
-                        ts     = entry.get("timestamp", "")[:16].replace("T", " ")
+                        ts     = to_ist(entry.get("timestamp", ""))
                         status = entry.get("status", "")
                         note   = entry.get("note", "")
                         icon   = FOLLOWUP_COLORS.get(status, "⚪")
