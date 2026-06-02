@@ -143,6 +143,36 @@ def get_followup_tracker_id() -> str:
         return ""
 
 
+def get_users() -> dict:
+    """Return {username: drive_folder_id} from [users] section in secrets."""
+    try:
+        return dict(st.secrets["users"])
+    except Exception:
+        return {}
+
+
+def get_user_drive_folder(username: str) -> str:
+    """Return Drive folder ID for a specific user. Falls back to GDRIVE_FOLDER_ID."""
+    users = get_users()
+    if username in users and users[username]:
+        return users[username]
+    return get_drive_folder_id()
+
+
+def get_admin_user() -> str:
+    """Return admin username from secrets. Only this user sees the Settings tab."""
+    try:
+        return st.secrets["ADMIN_USER"]
+    except Exception:
+        return ""
+
+
+def is_admin() -> bool:
+    """Return True if the current logged-in user is the admin."""
+    admin = get_admin_user()
+    return bool(admin and st.session_state.get("current_user") == admin)
+
+
 # ── Followup Tracker ──────────────────────────────────────────────────────────
 
 def download_tracker_bytes(drive_service) -> bytes | None:
@@ -339,12 +369,13 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds)
 
 
-def create_drive_folder(drive_service, folder_name: str) -> tuple[str, str]:
-    """Create subfolder inside ALIND QUOTES. Returns (folder_id, folder_url)."""
+def create_drive_folder(drive_service, folder_name: str, parent_folder_id: str = "") -> tuple[str, str]:
+    """Create subfolder inside parent Drive folder. Returns (folder_id, folder_url)."""
+    parent = parent_folder_id or get_drive_folder_id()
     meta = {
         "name":     folder_name,
         "mimeType": "application/vnd.google-apps.folder",
-        "parents":  [get_drive_folder_id()],
+        "parents":  [parent],
     }
     folder = drive_service.files().create(body=meta, fields="id").execute()
     folder_id  = folder.get("id")
@@ -496,16 +527,22 @@ def create_attachment_subfolder(drive_service, parent_folder_id: str, direction:
     return folder.get("id")
 
 
-def save_to_drive(service, email: dict, fields: dict) -> tuple[str, int]:
+def save_to_drive(service, email: dict, fields: dict, user_folder_id: str = "") -> tuple[str, int]:
     """Create Drive folder, upload attachments in subfolder + Excel. Returns (folder_url, att_count)."""
     try:
         drive_service = get_drive_service()
-        date_str    = datetime.now().strftime("%Y-%m-%d")
+        # Use mail received date for folder naming (fall back to today)
+        raw_date = email.get("date_raw", "")
+        try:
+            from email.utils import parsedate_to_datetime
+            date_str = parsedate_to_datetime(raw_date).strftime("%Y-%m-%d") if raw_date else datetime.now().strftime("%Y-%m-%d")
+        except Exception:
+            date_str = datetime.now().strftime("%Y-%m-%d")
         # Use company name if available, else email ID, then customer name
         name_part   = fields.get("company_name") or fields.get("customer_email") or fields.get("customer_name") or "Unknown"
         safe_name   = re.sub("[^a-zA-Z0-9 _@.-]", "", name_part).strip().replace(" ", "_").replace("@", "_").replace(".", "_")
         folder_name = f"{safe_name}_{date_str}"
-        folder_id, folder_url = create_drive_folder(drive_service, folder_name)
+        folder_id, folder_url = create_drive_folder(drive_service, folder_name, parent_folder_id=user_folder_id)
 
         # Upload Quote Template at root of quote folder
         excel_bytes = generate_quote_excel(email, fields, folder_url)
@@ -854,6 +891,7 @@ def fetch_unread_emails(service) -> list:
             "subject":     headers.get("Subject", "(no subject)"),
             "sender":      headers.get("From", ""),
             "date":        date_fmt,
+            "date_raw":    date_raw,
             "body":        body,
             "preview":     body[:120].replace("\n", " ").strip(),
             "attachments": atts,
@@ -898,7 +936,8 @@ def extract_quote_fields(email: dict) -> dict | None:
 
 # ── Supabase Insert / Update ───────────────────────────────────────────────────
 
-def upsert_quote(supabase: Client, service, email: dict, fields: dict) -> tuple[bool, str]:
+def upsert_quote(supabase: Client, service, email: dict, fields: dict,
+                 extracted_by: str = "", user_folder_id: str = "") -> tuple[bool, str]:
     """
     Insert new quote or append to existing thread.
     Returns (success, action) where action is 'inserted' or 'updated'.
@@ -942,7 +981,7 @@ def upsert_quote(supabase: Client, service, email: dict, fields: dict) -> tuple[
             return False, str(e)
     else:
         # New thread — save to Drive (attachments + Excel) and insert
-        folder_path, att_count = save_to_drive(service, email, fields)
+        folder_path, att_count = save_to_drive(service, email, fields, user_folder_id=user_folder_id)
 
         row = {
             "thread_id":           thread_id or None,
@@ -967,6 +1006,7 @@ def upsert_quote(supabase: Client, service, email: dict, fields: dict) -> tuple[
             "last_reply_at":       now,
             "attachment_folder":   folder_path or None,
             "attachment_count":    att_count,
+            "extracted_by":        extracted_by or None,
         }
         try:
             supabase.schema(get_schema()).table("quote_requests").insert(row).execute()
@@ -999,7 +1039,53 @@ if _provider not in _supported_providers:
     st.stop()
 
 
-tab_inbox, tab_quotes, tab_analytics, tab_followup, tab_settings = st.tabs(["📬 Inbox", "📋 Quote Requests", "📊 Analytics", "📊 Track Status", "⚙️ Settings"])
+# ── User Login ─────────────────────────────────────────────────────────────────
+
+_users = get_users()
+
+if not _users:
+    st.error("No users configured. Please add a [users] section to secrets.toml.")
+    st.stop()
+
+if "current_user" not in st.session_state:
+    st.session_state["current_user"] = None
+
+if not st.session_state["current_user"]:
+    st.markdown("---")
+    col_login, _, _ = st.columns([2, 2, 2])
+    with col_login:
+        st.markdown("#### 👤 Who are you?")
+        selected_user = st.selectbox(
+            "Select your name to continue",
+            ["— select —"] + list(_users.keys()),
+            label_visibility="collapsed",
+        )
+        if st.button("▶ Continue", type="primary", use_container_width=True):
+            if selected_user == "— select —":
+                st.warning("Please select your name.")
+            else:
+                st.session_state["current_user"] = selected_user
+                st.rerun()
+    st.stop()
+
+# Show logged-in user in sidebar
+st.sidebar.markdown(f"👤 **{st.session_state['current_user']}**")
+if st.sidebar.button("🚪 Switch User"):
+    st.session_state["current_user"] = None
+    st.rerun()
+
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+
+_tab_labels = ["📬 Inbox", "📋 Quote Requests", "📊 Analytics", "📊 Track Status"]
+if is_admin():
+    _tab_labels.append("⚙️ Settings")
+
+_tabs = st.tabs(_tab_labels)
+tab_inbox    = _tabs[0]
+tab_quotes   = _tabs[1]
+tab_analytics = _tabs[2]
+tab_followup = _tabs[3]
+tab_settings = _tabs[4] if is_admin() else None
 
 
 # ── Tab 1: Inbox ───────────────────────────────────────────────────────────────
@@ -1144,7 +1230,11 @@ with tab_inbox:
                 log(f"   Urgency  : {fields.get('urgency_level') or '—'}\n")
                 log(f"   Review?  : {'⚠️ Yes' if fields.get('needs_review') else '✅ No'}\n")
 
-                ok, action = upsert_quote(supabase, service, email, fields)
+                _current_user    = st.session_state.get("current_user", "")
+                _user_folder_id  = get_user_drive_folder(_current_user)
+                ok, action = upsert_quote(supabase, service, email, fields,
+                                          extracted_by=_current_user,
+                                          user_folder_id=_user_folder_id)
                 if ok:
                     mark_as_read(service, email["id"])
                     if action == "inserted":
@@ -1175,12 +1265,14 @@ with tab_inbox:
 with tab_quotes:
     supabase = get_supabase()
 
-    col1, col2, col3 = st.columns([2, 2, 1])
+    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     with col1:
         status_filter  = st.selectbox("Status", ["All"] + STATUS_OPTIONS)
     with col2:
         urgency_filter = st.selectbox("Urgency", ["All", "high", "medium", "low"])
     with col3:
+        show_all_users = st.checkbox("👥 Show all users", value=False, key="quotes_show_all")
+    with col4:
         st.write("")
         st.button("🔄 Refresh", use_container_width=True, key="refresh_quotes")
 
@@ -1188,6 +1280,8 @@ with tab_quotes:
         query = supabase.schema(get_schema()).table("quote_requests").select("*").order("created_at", desc=True)
         if status_filter  != "All": query = query.eq("status", status_filter)
         if urgency_filter != "All": query = query.eq("urgency_level", urgency_filter)
+        if not show_all_users:
+            query = query.eq("extracted_by", st.session_state.get("current_user", ""))
         rows = query.execute().data
     except Exception as e:
         st.error(f"Could not load from Supabase: {e}")
@@ -1245,6 +1339,8 @@ with tab_quotes:
                         st.write(f"Notes : {row['notes']}")
                     if row.get("last_reply_at"):
                         st.write(f"Last reply   : {to_ist(row.get('last_reply_at', ''))}")
+                    if row.get("extracted_by"):
+                        st.write(f"Extracted by : 👤 {row['extracted_by']}")
 
                     st.markdown("**Update Status**")
                     new_status = st.selectbox(
@@ -1332,15 +1428,20 @@ with tab_analytics:
     supabase = get_supabase()
 
     # Date filter
-    col_f1, col_f2 = st.columns([3, 1])
+    col_f1, col_f2, col_f3 = st.columns([3, 1, 2])
     with col_f1:
         st.markdown("### 📊 Quote Analytics")
     with col_f2:
         period = st.selectbox("Period", ["Last 30 days", "All time"], label_visibility="collapsed")
+    with col_f3:
+        an_show_all_users = st.checkbox("👥 Show all users", value=False, key="an_show_all")
 
-    # Fetch all records
+    # Fetch records — filtered by user unless toggled
     try:
-        rows = supabase.schema(get_schema()).table("quote_requests").select("*").order("created_at", desc=True).execute().data
+        an_query = supabase.schema(get_schema()).table("quote_requests").select("*").order("created_at", desc=True)
+        if not an_show_all_users:
+            an_query = an_query.eq("extracted_by", st.session_state.get("current_user", ""))
+        rows = an_query.execute().data
     except Exception as e:
         st.error(f"Could not load data: {e}")
         rows = []
@@ -1503,7 +1604,7 @@ with tab_followup:
     st.markdown("### 📊 Track Status")
 
     # Filters
-    col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
+    col_f1, col_f2, col_f3, col_f4 = st.columns([2, 2, 2, 1])
     with col_f1:
         fu_status_filter = st.selectbox(
             "Follow Up Status",
@@ -1517,6 +1618,8 @@ with tab_followup:
             key="fu_quote_filter"
         )
     with col_f3:
+        fu_show_all_users = st.checkbox("👥 Show all users", value=False, key="fu_show_all")
+    with col_f4:
         st.write("")
         st.button("🔄 Refresh", use_container_width=True, key="fu_refresh")
 
@@ -1527,6 +1630,8 @@ with tab_followup:
             query = query.eq("followup_status", fu_status_filter)
         if quote_status_filter != "All":
             query = query.eq("status", quote_status_filter)
+        if not fu_show_all_users:
+            query = query.eq("extracted_by", st.session_state.get("current_user", ""))
         fu_rows = query.execute().data
     except Exception as e:
         st.error(f"Could not load follow-up data: {e}")
@@ -1647,113 +1752,114 @@ with tab_followup:
 
 # ── Tab 5: Settings ────────────────────────────────────────────────────────────
 
-with tab_settings:
-    supabase = get_supabase()
+if tab_settings:
+    with tab_settings:
+        supabase = get_supabase()
 
-    st.markdown("### ⚙️ Settings")
+        st.markdown("### ⚙️ Settings")
 
-    # ── Blocked Senders ────────────────────────────────────────────────────────
-    st.markdown("#### 🚫 Blocked Senders")
-    st.caption(
-        "Emails from these addresses or domains will never appear in the Inbox. "
-        "Use @domain.com to block an entire domain (e.g. @linkedin.com)."
-    )
-
-    # Fetch current blocked list
-    try:
-        blocked = supabase.schema(get_schema()).table("blocked_senders").select("*").order("created_at", desc=False).execute().data
-    except Exception as e:
-        st.error(f"Could not load blocked senders: {e}")
-        blocked = []
-
-    # Display existing blocked senders
-    if not blocked:
-        st.info("No blocked senders yet.")
-    else:
-        for b in blocked:
-            col_pattern, col_note, col_del = st.columns([3, 4, 1])
-            with col_pattern:
-                st.code(b.get("pattern", ""), language=None)
-            with col_note:
-                st.caption(b.get("note") or "—")
-            with col_del:
-                if st.button("✕", key=f"del_blocked_{b['id']}", help="Remove this block"):
-                    try:
-                        supabase.schema(get_schema()).table("blocked_senders").delete().eq("id", b["id"]).execute()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Could not remove: {e}")
-
-    st.divider()
-
-    # Add new blocked sender
-    st.markdown("**Add blocked sender or domain:**")
-    col_add1, col_add2, col_add3 = st.columns([3, 4, 1])
-    with col_add1:
-        new_pattern = st.text_input(
-            "Email or domain",
-            placeholder="e.g. noreply@linkedin.com or @newsletter.com",
-            label_visibility="collapsed",
-            key="new_block_pattern"
+        # ── Blocked Senders ────────────────────────────────────────────────────────
+        st.markdown("#### 🚫 Blocked Senders")
+        st.caption(
+            "Emails from these addresses or domains will never appear in the Inbox. "
+            "Use @domain.com to block an entire domain (e.g. @linkedin.com)."
         )
-    with col_add2:
-        new_note = st.text_input(
-            "Note (optional)",
-            placeholder="e.g. LinkedIn notifications",
-            label_visibility="collapsed",
-            key="new_block_note"
-        )
-    with col_add3:
-        if st.button("➕ Add", type="primary", use_container_width=True):
-            if new_pattern.strip():
-                try:
-                    # Support comma-separated multiple entries
-                    patterns = [p.strip().lower() for p in new_pattern.split(",") if p.strip()]
-                    added = []
-                    for p in patterns:
+
+        # Fetch current blocked list
+        try:
+            blocked = supabase.schema(get_schema()).table("blocked_senders").select("*").order("created_at", desc=False).execute().data
+        except Exception as e:
+            st.error(f"Could not load blocked senders: {e}")
+            blocked = []
+
+        # Display existing blocked senders
+        if not blocked:
+            st.info("No blocked senders yet.")
+        else:
+            for b in blocked:
+                col_pattern, col_note, col_del = st.columns([3, 4, 1])
+                with col_pattern:
+                    st.code(b.get("pattern", ""), language=None)
+                with col_note:
+                    st.caption(b.get("note") or "—")
+                with col_del:
+                    if st.button("✕", key=f"del_blocked_{b['id']}", help="Remove this block"):
                         try:
-                            supabase.schema(get_schema()).table("blocked_senders").insert({
-                                "pattern": p,
-                                "note":    new_note.strip() or None,
-                            }).execute()
-                            added.append(p)
-                        except Exception:
-                            pass  # skip duplicates silently
-                    if added:
-                        st.success(f"Blocked {len(added)} sender(s): {', '.join(added)}")
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Could not add: {e}")
-            else:
-                st.warning("Please enter an email or domain to block.")
+                            supabase.schema(get_schema()).table("blocked_senders").delete().eq("id", b["id"]).execute()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not remove: {e}")
 
-    st.divider()
+        st.divider()
 
-    # ── Ignored Emails ─────────────────────────────────────────────────────────
-    st.markdown("#### 🙈 Ignored Emails")
-    st.caption("Individual emails you have ignored. These will never reappear in the Inbox.")
-
-    try:
-        ignored = supabase.schema(get_schema()).table("ignored_emails").select("*").order("ignored_at", desc=True).execute().data
-    except Exception as e:
-        st.error(f"Could not load ignored emails: {e}")
-        ignored = []
-
-    if not ignored:
-        st.info("No ignored emails.")
-    else:
-        st.caption(f"{len(ignored)} ignored email(s)")
-        for ig in ignored:
-            col_i1, col_i2, col_i3 = st.columns([3, 4, 1])
-            with col_i1:
-                st.caption(ig.get("sender", "—"))
-            with col_i2:
-                st.caption(ig.get("subject", "—")[:60])
-            with col_i3:
-                if st.button("↩️", key=f"unignore_{ig['id']}", help="Restore this email"):
+        # Add new blocked sender
+        st.markdown("**Add blocked sender or domain:**")
+        col_add1, col_add2, col_add3 = st.columns([3, 4, 1])
+        with col_add1:
+            new_pattern = st.text_input(
+                "Email or domain",
+                placeholder="e.g. noreply@linkedin.com or @newsletter.com",
+                label_visibility="collapsed",
+                key="new_block_pattern"
+            )
+        with col_add2:
+            new_note = st.text_input(
+                "Note (optional)",
+                placeholder="e.g. LinkedIn notifications",
+                label_visibility="collapsed",
+                key="new_block_note"
+            )
+        with col_add3:
+            if st.button("➕ Add", type="primary", use_container_width=True):
+                if new_pattern.strip():
                     try:
-                        supabase.schema(get_schema()).table("ignored_emails").delete().eq("id", ig["id"]).execute()
-                        st.success("Restored — will appear on next Fetch.")
-                        st.rerun()
+                        # Support comma-separated multiple entries
+                        patterns = [p.strip().lower() for p in new_pattern.split(",") if p.strip()]
+                        added = []
+                        for p in patterns:
+                            try:
+                                supabase.schema(get_schema()).table("blocked_senders").insert({
+                                    "pattern": p,
+                                    "note":    new_note.strip() or None,
+                                }).execute()
+                                added.append(p)
+                            except Exception:
+                                pass  # skip duplicates silently
+                        if added:
+                            st.success(f"Blocked {len(added)} sender(s): {', '.join(added)}")
+                            st.rerun()
                     except Exception as e:
-                        st.error(f"Could not restore: {e}")
+                        st.error(f"Could not add: {e}")
+                else:
+                    st.warning("Please enter an email or domain to block.")
+
+        st.divider()
+
+        # ── Ignored Emails ─────────────────────────────────────────────────────────
+        st.markdown("#### 🙈 Ignored Emails")
+        st.caption("Individual emails you have ignored. These will never reappear in the Inbox.")
+
+        try:
+            ignored = supabase.schema(get_schema()).table("ignored_emails").select("*").order("ignored_at", desc=True).execute().data
+        except Exception as e:
+            st.error(f"Could not load ignored emails: {e}")
+            ignored = []
+
+        if not ignored:
+            st.info("No ignored emails.")
+        else:
+            st.caption(f"{len(ignored)} ignored email(s)")
+            for ig in ignored:
+                col_i1, col_i2, col_i3 = st.columns([3, 4, 1])
+                with col_i1:
+                    st.caption(ig.get("sender", "—"))
+                with col_i2:
+                    st.caption(ig.get("subject", "—")[:60])
+                with col_i3:
+                    if st.button("↩️", key=f"unignore_{ig['id']}", help="Restore this email"):
+                        try:
+                            supabase.schema(get_schema()).table("ignored_emails").delete().eq("id", ig["id"]).execute()
+                            st.success("Restored — will appear on next Fetch.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not restore: {e}")
